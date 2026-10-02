@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Lottie Optimiser 1.0.0, Lottie Importer 1.1.0 (2026-10-02)
 - Exporter: track mattes on groups are no longer exported: Cavalry draws a group's children unmatted (tested hidden and visible sources, inverted, nested groups), so the export clipped what Cavalry doesn't. A warning names the group.
 - Exporter: vertical skew exports, as do both skews at once and skew under non-uniform scale. Cavalry skews before scaling and lottie-web after, so rotation, scale and skew are rebuilt together (checked against Cavalry); keyed or driven ones are sampled every frame.
 - Importer: compound shapes and animated rectangles/ellipses under a moving group keep its animation too.

@@ -13,7 +13,7 @@ import * as kit from "./modules/ui/kit.js";
 // Check Update from Github
 var GITHUB_REPO = "sammularczyk/cavalry-lottie-tools";
 var scriptName = "Lottie Importer";
-var currentVersion = "1.0.0";
+var currentVersion = "1.1.0";
 
 function compareVersions(v1, v2) {
     var parts1 = v1.split('.').map(function(n) { return parseInt(n, 10) || 0; });
