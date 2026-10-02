@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { applyMasks, fillProps, layerMatrix, lottieRSK, padMatteBounds, repairPositions, staticSingleKeys, valueAt } from '../src/modules/precomps.js'
+import { applyMasks, fillProps, layerMatrix, lottieRSK, padMatteBounds, planMattes, repairPositions, staticSingleKeys, valueAt } from '../src/modules/precomps.js'
 
 // Rect centres measured in Cavalry (y up, origin at the comp centre) at frames 0, 5, 10.
 const CAVALRY = {
@@ -157,4 +157,33 @@ test('lottieRSK rebuilds Cavalry rotation, scale and skew (both axes) as lottie-
 		const x = m[0] * 100 + m[1] * -40 + m[4], y = m[2] * 100 + m[3] * -40 + m[5] // y down
 		assert.ok(Math.abs(x - want[0]) < 0.01 && Math.abs(-y - want[1]) < 0.01, JSON.stringify([o, x, -y]))
 	}
+})
+
+test('planMattes skips group track mattes (Cavalry draws the children unmatted)', () => {
+	// comp → [group G (matted by S1) → shape T, shape U (matted by S2)]
+	const scene = {
+		comp: { children: ['G', 'U', 'S1', 'S2'] },
+		G: { type: 'group', children: ['T'], mattes: ['S1'] },
+		T: { type: 'basicShape', children: [] },
+		U: { type: 'basicShape', children: [], mattes: ['S2'] },
+		S1: { type: 'basicShape', children: [], hidden: true },
+		S2: { type: 'basicShape', children: [], hidden: true },
+	}
+	const parentOf = (id) => Object.keys(scene).find((k) => (scene[k].children || []).includes(id)) || null
+	globalThis.api = {
+		getChildren: (id) => scene[id].children,
+		hasAttribute: (id, a) => a === 'matteMode',
+		get: (id, a) => (a === 'matteMode' ? 4 : a === 'hidden' ? !!scene[id].hidden : true),
+		getInConnectedAttributes: (id) => (scene[id].mattes || []).map((_, i) => 'trackMattes.' + i + '.id'),
+		getInConnection: (id, a) => scene[id].mattes[+a.split('.')[1]] + '.id',
+		getLayerType: (id) => scene[id].type,
+		getParent: parentOf,
+		getNiceName: (id) => id,
+	}
+	const warnings = []
+	const plan = planMattes('comp', (w) => warnings.push(w))
+	delete globalThis.api
+	assert.deepEqual(plan.jobs.map((j) => j.target), ['U'])
+	assert.deepEqual(plan.unhide, ['S2'])
+	assert.equal(warnings.length, 1)
 })

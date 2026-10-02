@@ -767,11 +767,16 @@ function matteConns(id) {
 
 // Track mattes in a comp: [{target, sources, tt}], plus the hidden
 // sources (and hidden ancestors) to show while Cavalry's writer exports them.
-function planMattes(comp) {
+export function planMattes(comp, warn) {
 	const jobs = [], unhide = new Set()
 	for (const id of compLayers(comp)) {
 		const ms = matteConns(id)
 		if (!ms.length) continue
+		// Cavalry draws a group's children unmatted (tested: hidden, visible, inverted, nested)
+		if (api.getLayerType(id) === 'group') {
+			if (warn) warn('The track matte on group ' + api.getNiceName(id) + ' does nothing in Cavalry, so it isn’t exported')
+			continue
+		}
 		jobs.push({ target: id, sources: ms.map((m) => m.id), tt: MATTE_TT[ms[0].mode] || 1 })
 		for (const m of ms)
 			for (let q = m.id, g = 0; q && q !== comp && g < 64; q = api.getParent(q), g++) {
@@ -951,7 +956,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 		userFrame = api.getFrame()
 
 	function build(comp) {
-		const plan = planMattes(comp)
+		const plan = planMattes(comp, (w) => warnings.push(w))
 		const shown = []
 		let out
 		try {
@@ -1052,8 +1057,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 	// Each matte becomes a precomp of its source's layers (their outside parents copied as
 	// nulls, so they stay put), referenced by a matte layer (td) directly above every
 	// drawing layer it clips, which takes the matte type (tt). Several mattes on one layer
-	// share one precomp: their union.
-	// ponytail: mixed matte modes on one layer use the first one's.
+	// share one precomp: their union (Cavalry sets one matte mode per layer, not per matte).
 	function buildTrackMattes(comp, exported, sceneOf, plan) {
 		if (!plan.jobs.length) return
 		const layers = exported.layers

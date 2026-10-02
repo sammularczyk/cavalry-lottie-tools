@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Exporter: track mattes on groups are no longer exported: Cavalry draws a group's children unmatted (tested hidden and visible sources, inverted, nested groups), so the export clipped what Cavalry doesn't. A warning names the group.
 - Exporter: vertical skew exports, as do both skews at once and skew under non-uniform scale. Cavalry skews before scaling and lottie-web after, so rotation, scale and skew are rebuilt together (checked against Cavalry); keyed or driven ones are sampled every frame.
 - Importer: compound shapes and animated rectangles/ellipses under a moving group keep its animation too.
 - Optimiser: "Share identical layers as one precomp" also shares copies that are track-matted, masked or carry effects; each copy keeps its own matte, masks, effects and transform (mirrored copies included). The CTV intro went from 278 KB to 253 KB, drawing the same in lottie-web.
