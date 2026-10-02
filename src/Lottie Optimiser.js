@@ -9,6 +9,7 @@ import { theme, label, section, button, row, toggleRow, list, tabStrip } from '.
 import { checkForUpdate } from './modules/updateChecker.js'
 import { exportComp, BAKE_MODES } from './modules/cavalryExport.js'
 import { packImages } from './modules/images.js'
+import { gzipSize, zip, utf8, base64 } from './modules/zip.js'
 import { exportWithPrecomps } from './modules/precomps.js'
 
 var GITHUB_REPO = 'phillip-motion/cavalry-lottie-tools' // ponytail: confirm owner before first release
@@ -18,7 +19,7 @@ var PREF_KEY = 'lottieTools_exporter' // old key kept so saved settings carry ov
 // ---------- settings ----------
 
 function defaults() {
-	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, precomps: true, bakeMode: 0, tab: 0, accuracy: 1, display: 0, embedImages: true, jpegImages: false, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
+	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, precomps: true, bakeMode: 0, tab: 0, accuracy: 1, display: 0, format: 0, embedImages: true, jpegImages: false, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
 	PASSES.forEach(function (p) {
 		s[p.id] = p.on
 	})
@@ -53,6 +54,11 @@ var ACCURACY = [
 	{ label: 'Small file (½ px)', px: 0.5 },
 	{ label: 'Smallest (1 px)', px: 1 },
 ]
+var FORMATS = [
+	{ label: 'Lottie JSON', json: true },
+	{ label: 'dotLottie (.lottie)', lottie: true },
+	{ label: 'Both', json: true, lottie: true },
+]
 var DISPLAY = [
 	{ label: 'Full size', scale: 1 },
 	{ label: 'Half size', scale: 0.5 },
@@ -76,7 +82,7 @@ var TIPS = {
 	collapseStatic: ['A property whose keyframes all hold the same value becomes a plain value.', 'Turns “animated” constants into values'],
 	removeRedundantKeys: ['Removes keyframes that don’t change the motion: repeats, or keys on a straight line.', 'Removes keys that change nothing'],
 	trimKeyframeFields: ['Removes keyframe data that players never read.', 'Removes unused keyframe data'],
-	removeDefaults: ['Leaves out settings that already match the default.', 'Leaves out default settings'],
+	removeDefaults: ['Leaves out values every player assumes anyway: positions and anchors at 0, scale 100%, no rotation, full opacity, zero skew, empty names. Checked against the lottie-web, Android, iOS and ThorVG source.', 'Leaves out default values'],
 	unwrapScalars: ['Writes single values more compactly.', 'Writes single values more compactly'],
 	stripMeta: ['Removes notes and labels that only After Effects or Cavalry use.', 'Removes editor-only notes'],
 	holdJumps: ['Phones and 120 Hz screens draw frames in between yours. A value that snaps from one frame to the next would slide; this keeps it a snap, as in Cavalry.', 'Snaps stay snaps on fast screens'],
@@ -301,6 +307,7 @@ opts.layout.add(label('Images', 10, T.muted))
 opts.layout.add(optionRow('embedImages', 'Embed images in the file', 'Puts images inside the JSON, so it’s one file to hand over. Images grow by a third when embedded. Off: images are saved in an images folder next to the file.', 'One file, nothing to lose'))
 opts.layout.add(optionRow('jpegImages', 'Save opaque images as JPEG', 'Images with no transparency are saved as JPEG (85% quality) when that’s smaller. Slight JPEG softening. macOS only; Cavalry asks you to trust the script the first time.', 'Smaller, slightly softer'))
 opts.layout.add(label('Output', 10, T.muted))
+opts.layout.add(choiceRow('format', 'Save as', FORMATS, 'Lottie JSON plays everywhere. dotLottie is the same animation zipped with its images: usually a fifth of the size, for LottieFiles players, the dotLottie runtimes, and lottie-android / lottie-ios. Not lottie-web on its own.'))
 opts.layout.add(optionRow('stripNames', 'Strip layer and shape names', 'Smaller file. Leave off if a developer changes colours or text from code, since apps find layers by name.', 'Leave off if apps find layers by name'))
 opts.layout.add(optionRow('exponent', 'Short number format', 'Writes tiny and huge numbers in short form. Every player reads it.', '0.000001 → 1e-6'))
 opts.layout.add(optionRow('pretty', 'Pretty print', 'Spaced out so people can read it. Much larger; use for debugging only.', 'Readable, much larger'))
@@ -338,25 +345,44 @@ function passSettings() {
 function optimiseAndWrite(json, out, extra, dirs) {
 	var ps = passSettings()
 	var result = optimise(json, ps)
-	var pack = packImages(result.json, dirs, api.getFolderFromPath(out), { embed: settings.embedImages, jpeg: settings.jpegImages })
-	if (pack.embedded || pack.copied) {
-		result.text = serialise(result.json, { pretty: ps.pretty, exponent: ps.exponent })
-		result.report[result.report.length - 1].bytes = result.text.length
+	var fmt = FORMATS[settings.format] || FORMATS[0]
+	var fmtOpts = { pretty: ps.pretty, exponent: ps.exponent }
+	var notes = []
+	var saved = []
+	if (fmt.lottie) {
+		var lj = JSON.parse(JSON.stringify(result.json))
+		var files = []
+		packImages(lj, dirs, null, { lottie: files, jpeg: settings.jpegImages })
+		var id = api.getFileNameFromPath(out, false).replace(/[^A-Za-z0-9_-]+/g, '_') || 'animation'
+		var manifest = { version: '2', generator: SCRIPT_NAME, animations: [{ id: id }] }
+		var bytes = zip([{ name: 'manifest.json', data: utf8(JSON.stringify(manifest)) }, { name: 'a/' + id + '.json', data: utf8(serialise(lj, fmtOpts)) }].concat(files))
+		var lottiePath = out.replace(/\.json$/i, '') + '.lottie'
+		if (!api.writeEncodedToBinaryFile(lottiePath, base64(bytes))) {
+			status.setText('Could not write ' + lottiePath)
+			return
+		}
+		saved.push(api.getFileNameFromPath(lottiePath, true) + ' ' + kb(bytes.length))
+		if (files.length) notes.push(files.length + ' image(s) packed in the .lottie')
 	}
-	var imageNote = []
-	if (pack.embedded) imageNote.push(pack.embedded + ' image(s) embedded')
-	if (pack.copied) imageNote.push(pack.copied + ' image(s) saved to images/')
-	if (pack.jpeg) imageNote.push(pack.jpeg + ' as JPEG')
-	if (pack.missing) imageNote.push(pack.missing + ' image(s) not found')
-	if (imageNote.length) extra = (extra || []).concat([imageNote.join(' · ')])
-	if (!api.writeToFile(out, result.text, true)) {
-		status.setText('Could not write ' + out)
-		return
+	if (fmt.json) {
+		var pack = packImages(result.json, dirs, api.getFolderFromPath(out), { embed: settings.embedImages, jpeg: settings.jpegImages })
+		if (pack.embedded || pack.copied) result.text = serialise(result.json, fmtOpts)
+		if (pack.embedded) notes.push(pack.embedded + ' image(s) embedded')
+		if (pack.copied) notes.push(pack.copied + ' image(s) saved to images/')
+		if (pack.jpeg) notes.push(pack.jpeg + ' as JPEG')
+		if (pack.missing) notes.push(pack.missing + ' image(s) not found')
+		if (!api.writeToFile(out, result.text, true)) {
+			status.setText('Could not write ' + out)
+			return
+		}
+		saved.unshift(api.getFileNameFromPath(out, true) + ' ' + kb(result.text.length) + ' (' + kb(gzipSize(result.text)) + ' gzipped)')
 	}
+	result.report[result.report.length - 1].bytes = result.text.length
+	if (notes.length) extra = (extra || []).concat([notes.join(' · ')])
 	var r = result.report
 	var issues = checkLottie(result.json, settings.targets)
 	var lines = (extra || []).concat([
-		kb(r[0].bytes) + ' → ' + kb(r[r.length - 1].bytes) + ' (' + Math.round(100 - (100 * r[r.length - 1].bytes) / r[0].bytes) + '% smaller) · saved ' + api.getFileNameFromPath(out, true),
+		kb(r[0].bytes) + ' → ' + kb(r[r.length - 1].bytes) + ' JSON (' + Math.round(100 - (100 * r[r.length - 1].bytes) / r[0].bytes) + '% smaller) · saved ' + saved.join(', '),
 		summary(issues, showResults(issues, api.getFileNameFromPath(out, true))),
 	])
 	status.setText(lines.join('\n'))

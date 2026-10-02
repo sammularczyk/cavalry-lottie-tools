@@ -335,12 +335,31 @@ export function trimKeyframeFields(json) {
 
 // Fields equal to what every player assumes when they are missing: zero skew (and its
 // axis), auto-orient off, empty names/match names, an empty glyph list.
+// Transform values every player fills in when missing (checked in lottie-web, lottie-
+// android, lottie-ios and ThorVG source). A shape group's opacity stays: lottie-web's
+// canvas renderer reads it without a fallback.
+function dropDefaultTransform(t, keepOpacity) {
+	let n = 0
+	const is = (p, d) => p && !isAnimated(p) && !p.x && asArray(p.k).every((v, i) => Math.abs(v - (d[i] != null ? d[i] : d[d.length - 1])) < EPS)
+	const drop = (k, d) => is(t[k], d) && (delete t[k], n++)
+	if (t.p && t.p.s) {
+		if (is(t.p.x, [0]) && is(t.p.y, [0]) && (!t.p.z || is(t.p.z, [0]))) (delete t.p, n++)
+	} else drop('p', [0])
+	drop('a', [0])
+	drop('s', [100])
+	drop('r', [0])
+	if (!keepOpacity) drop('o', [100])
+	return n
+}
+
 export function removeDefaults(json) {
 	let n = 0
 	const zero = (p) => p && !isAnimated(p) && !p.x && Number(asArray(p.k)[0]) === 0
 	const walk = (node) => {
 		if (Array.isArray(node)) return node.forEach(walk)
 		if (!isObj(node)) return
+		if (node.ty === 'tr') n += dropDefaultTransform(node, true)
+		else if (typeof node.ty === 'number' && isObj(node.ks)) n += dropDefaultTransform(node.ks, false)
 		if (zero(node.sk) && (!node.sa || zero(node.sa))) {
 			delete node.sk
 			delete node.sa

@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Optimiser: default transform values (0 position/anchor, 100% scale and opacity, no rotation) are left out; every player fills them in. A shape group keeps its opacity (lottie-web canvas needs it).
+- Optimiser: save as dotLottie (.lottie, version 2) with images packed in i/, or both; zipped in plain JS, so no shell tools or trust prompt.
+- Optimiser: the summary shows the gzipped size a web server would send.
 - Optimiser: "Remove doubled fills and strokes" fixes Cavalry writing every path's paint twice (see-through colours rendered too strong); matches Cavalry exactly and saves a fifth of a typical file.
 - Optimiser: "Merge neighbouring shape layers" and "Share fills and strokes between shapes" restructure Cavalry's one-layer-per-shape output the way After Effects files are built; lossless.
 - Optimiser: baked keyframes are replaced with a few fitted, eased keys (checked every half frame); path morphs fit with one shared ease and curved motion becomes motion paths.

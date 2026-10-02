@@ -170,8 +170,19 @@ test('optimise: reports bytes per pass and never grows the file', () => {
 	assert.equal(r.report[0].id, 'input')
 	assert.ok(r.report.at(-1).bytes < r.report[0].bytes)
 	assert.equal(j.layers[0].ks.o.a, 1, 'input is not mutated')
-	assert.equal(r.json.layers[0].ks.o.a, 0)
+	assert.equal(r.json.layers[0].ks.o, undefined) // collapsed to 100, then left out as the default
 	assert.deepEqual(r.json.assets, [])
+})
+
+test('removeDefaults: default transform values go, except a shape group’s opacity', () => {
+	const tr = idTr()
+	const j = { layers: [layer({ ks: { o: { a: 0, k: 100 }, p: { a: 0, k: [0, 0, 0] }, a: { a: 0, k: [0, 0, 0] }, s: { a: 0, k: [100, 100, 100] }, r: { a: 0, k: 0 } }, shapes: [{ ty: 'gr', it: [tr] }] })] }
+	P.removeDefaults(j)
+	assert.deepEqual(j.layers[0].ks, {})
+	assert.deepEqual(Object.keys(tr).sort(), ['o', 'ty']) // lottie-web canvas needs a group's o
+	const moved = { layers: [layer({ ks: { p: { a: 0, k: [5, 0, 0] }, s: { a: 0, k: [50, 50, 100] } } })] }
+	P.removeDefaults(moved)
+	assert.deepEqual(Object.keys(moved.layers[0].ks).sort(), ['p', 's'])
 })
 
 // ---------- lossy ----------
