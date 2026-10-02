@@ -1,6 +1,16 @@
 # Changelog
 
 ## Unreleased
+- Optimiser: fitted motion paths never use an ease that dips below 0. lottie-web jumps a motion path to its segment's end whenever progress goes negative, so particles snapped across the screen (up to 24 px in the flourish).
+- Optimiser panel: "Experimental: refit eased keys" under Advanced (off in every preset) lets keyframe fitting replace keys that already have eases, checked every half frame. The 596-particle flourish went from 2.7 MB to 1.34 MB (0.48 px at most); optimising took 4 s instead of 0.6 s.
+- Optimiser: "Turn baked moving shapes back into transforms" also takes eased keys several frames apart when the shape only moves and scales (exact: that's how position and scale interpolate), shapes that grow from a single point, and leaves a turn too small to see as a still rotation. A 596-particle flourish went from 3.0 MB to 2.7 MB.
+- Optimiser: rounding keeps more decimals on keys either side of an ease that overshoots; Cavalry writes ease handles relative to the change, so a key pair 0.01 apart with a ×128 handle swung 7.5 px off once rounded.
+- Exporter: keys keep the scene's eases where Cavalry's writer clamped them to 0–1, so overshooting eases overshoot again (an animated corner radius went straight to its end value, and the star cut from those corners didn't meet them). Corner radius is now matched to its scene keys too.
+- Optimiser: "Simplify paths" now works on animated paths too (keys that morph lose the same points; keys after a hold simplify on their own), and refits baked polylines as curves. A baked 434-point superellipse in one Extreme export went to 15 points, taking the file from 624 KB to 278 KB.
+- Exporter: fills use Even Odd when the shape does (Cavalry's default; its writer leaves the rule out, so players filled nonzero and a star cut from a square drew as a solid square).
+- Exporter: skew exports (Cavalry's writer always writes 0), and positions are corrected with it, so content under a skewed group is no longer tilted wrong and shifted.
+- Exporter: straight stroked lines under a track matte get an invisible rect over their stroked bounds; lottie-web sizes a matte's mask from the path's bounds, so a perfectly straight line vanished.
+- Exporter: Fill filters (dropped by Cavalry's writer) export as After Effects Fill effects, the way bodymovin writes them, with their colour keys; a filter on a group goes on every layer under it. Drawn by lottie-web SVG, ThorVG and Skottie; the player check flags the rest.
 - Exporter: every track matte exports as a real Lottie track matte (masks under an animated parent drifted between frames, so a bar stretched past its matte on fast screens).
 - Exporter: track mattes that a mask can't stand in for (stroked sources, luma, alpha) export as real Lottie track mattes: the source (shown briefly for the export if hidden) becomes a matte precomp above each layer it clips.
 - Exporter: a group's in/out frames now limit its children, as in Cavalry (Lottie parenting doesn't).

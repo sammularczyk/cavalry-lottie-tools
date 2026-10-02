@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { applyMasks, repairPositions, staticSingleKeys, valueAt } from '../src/modules/precomps.js'
+import { applyMasks, fillProps, layerMatrix, padMatteBounds, repairPositions, staticSingleKeys, valueAt } from '../src/modules/precomps.js'
 
 // Rect centres measured in Cavalry (y up, origin at the comp centre) at frames 0, 5, 10.
 const CAVALRY = {
@@ -92,4 +92,40 @@ test('inheritOpacity folds parent opacity into children (Lottie parents only pas
 	assert.deepEqual(o3.k.map((k) => k.s[0]), [50, 50, 50, 0, 0, 0, 0])
 	assert.equal(o3.k[0].h, 1, 'hold keys stay steps')
 	assert.deepEqual(layers[4].ks.o, { a: 0, k: 20 })
+})
+
+test('fillProps: shared channel keys kept, mismatched keys baked per frame, alpha to opacity', () => {
+	const hold = (t, v) => ({ t, s: [v], h: 1 })
+	const still = (v) => ({ a: 0, k: v })
+	const keyed = (...k) => ({ a: 1, k })
+	// r, g, b keyed together (holds), alpha static
+	const a = fillProps([keyed(hold(0, 0), { t: 3, s: [1] }), keyed(hold(0, 1), { t: 3, s: [0] }), keyed(hold(0, 0.5), { t: 3, s: [0.5] }), still(0.5)], 0, 10)
+	assert.deepEqual(a.color.k, [{ t: 0, s: [0, 1, 0.5, 1], h: 1 }, { t: 3, s: [1, 0, 0.5, 1] }])
+	assert.deepEqual(a.opacity, { a: 0, k: 0.5 })
+	// keys at different frames: one key per frame, values from each channel
+	const lin = { o: { x: [0], y: [0] }, i: { x: [1], y: [1] } }
+	const b = fillProps([keyed({ t: 0, s: [0], ...lin }, { t: 4, s: [1] }), still(0), still(0), keyed({ t: 0, s: [1], ...lin }, { t: 2, s: [0] })], 0, 4)
+	assert.equal(b.color.k.length, 5)
+	assert.deepEqual(b.color.k[2].s.map((v) => +v.toFixed(6)), [0.5, 0, 0, 1])
+	assert.equal(+b.opacity.k[1].s[0].toFixed(6), 0.5)
+	// nothing keyed: static
+	assert.deepEqual(fillProps([still(1), still(0), still(0), still(1)], 0, 4).color, { a: 0, k: [1, 0, 0, 1] })
+})
+
+test('layerMatrix skews like lottie-web: x shifts by -tan(sk)·y, before rotation', () => {
+	const apply = (M, [x, y]) => [M[0] * x + M[1] * y + M[4], M[2] * x + M[3] * y + M[5]]
+	const near = (a, b) => a.forEach((v, i) => assert.ok(Math.abs(v - b[i]) < 1e-9, a + ' vs ' + b))
+	near(apply(layerMatrix({ sk: { a: 0, k: 45 } }, 0), [0, 10]), [-10, 10])
+	// rotated 90° after the skew: (0,10) -> skew (-10,10) -> rotate (-10,-10)
+	near(apply(layerMatrix({ sk: { a: 0, k: 45 }, r: { a: 0, k: 90 } }, 0), [0, 10]), [-10, -10])
+})
+
+test('padMatteBounds widens a straight stroked line so lottie-web’s matte mask keeps it', () => {
+	const still = (k) => ({ a: 0, k })
+	const layer = (v, w) => ({ shapes: [{ ty: 'gr', it: [{ ty: 'sh', ks: still({ c: false, v, i: v.map(() => [0, 0]), o: v.map(() => [0, 0]) }) }, { ty: 'st', w: still(w) }, { ty: 'tr', p: still([0, 0]), a: still([0, 0]), s: still([100, 100]), r: still(0), o: still(100) }] }] })
+	const line = layer([[0, 50], [1000, 50]], 17)
+	assert.equal(padMatteBounds(line), true)
+	const rc = line.shapes[1].it[0]
+	assert.deepEqual([rc.p.k, rc.s.k], [[500, 50], [1034, 34]])
+	assert.equal(padMatteBounds(layer([[0, 0], [1000, 0], [1000, 1000]], 17)), false) // roomy: left alone
 })

@@ -7,7 +7,7 @@
 
 // ---------- walking ----------
 
-import { fitEase, fitMotionPath, easeAt, LINEAR, simplifyPath } from './fit.js'
+import { fitEase, fitMotionPath, easeAt, LINEAR, simplifyPath, simplifyPathSet } from './fit.js'
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 
@@ -976,7 +976,9 @@ export function holdJumps(json, opts = {}) {
 // every original key (and every frame of a long linear segment). All of a value's parts
 // share one ease, as players interpolate them: a path morphing along straight lines (any
 // vertices, one ease) fits as well as a number. Positions moving along a curve get a
-// motion path (`to`/`ti`). Authored eased keys, holds and existing motion paths stay.
+// motion path (`to`/`ti`). Authored eased keys, holds and existing motion paths stay;
+// opts.eased (experimental) fits across eased keys too, checked against their own eases
+// every half frame: for simulations Cavalry exports as many eased keys. Slower.
 export function simplifyKeys(json, opts = {}) {
 	let n = 0
 	forEachLayerProp(json, opts, BUDGET.fit, (p, key, owner, tolFor, L) => {
@@ -988,9 +990,9 @@ export function simplifyKeys(json, opts = {}) {
 		const dims = Array.isArray(k[0].s) && !shape ? k[0].s.length : 1
 		const kind = category(key, owner)
 		if (kind === 'time') return
-		const tol = tolFor(kind)
+		const tol = tolFor(kind) * (shape ? ANIMATED_PATH_SHARE : 1)
 		const motionPath = key === 'p' && !shape && (dims === 2 || (dims === 3 && vals.every((v) => Math.abs(v[2] - vals[0][2]) < EPS)))
-		const fittable = (j) => k[j].h !== 1 && !hasSpatial(k[j]) && (k[j + 1].t - k[j].t <= 1 + EPS || isLinearSegment(k[j], dims))
+		const fittable = (j) => k[j].h !== 1 && !hasSpatial(k[j]) && (opts.eased || k[j + 1].t - k[j].t <= 1 + EPS || isLinearSegment(k[j], dims))
 
 		// the original's value part-way (u) through segment j, with its own ease
 		const between = (j, u) => {
@@ -1177,8 +1179,10 @@ function fitRotateScale(P, Q) {
 }
 
 // Baked shapes that only move, turn or scale (also squash and stretch): keep the first
-// frame's path and animate the group's transform instead. Only for frame-by-frame bakes
-// (every key ≤ 1 frame apart), where transform and vertex interpolation agree.
+// key's path (the largest if the first is a single point, as when a shape grows from nothing) and animate the
+// group's transform instead. Keys more than a frame apart are fine while the shape doesn't
+// turn between them: moving and scaling every point along straight lines with one ease is
+// exactly what interpolating position and scale does. Turning would swing points on arcs.
 // ponytail: no shear (Lottie skew support varies by player); add sk/sa if bakes need it.
 export function recoverRigidMotion(json, opts = {}) {
 	const ctx = layerContexts(json, opts.display || 1)
@@ -1198,16 +1202,24 @@ export function recoverRigidMotion(json, opts = {}) {
 			const times = paths[0].ks.k.map((kf) => kf.t)
 			if (times.length < 2 || !paths.every((x) => x.ks.k.length === times.length && x.ks.k.every((kf, j) => kf.t === times[j] && kf.s)))
 				continue
-			if (times.some((t, j) => j && t - times[j - 1] > 1 + EPS)) continue
 			const frameShapes = times.map((_, j) => paths.flatMap((x) => x.ks.k[j].s))
-			const base = frameShapes[0]
+			const spread = (f) => {
+				const q = shapePoints(f)
+				return Math.max(...q.map((a) => Math.hypot(a[0] - q[0][0], a[1] - q[0][1])))
+			}
+			let b0 = 0
+			if (spread(frameShapes[0]) < EPS)
+				frameShapes.forEach((f, j) => {
+					if (spread(f) > spread(frameShapes[b0])) b0 = j
+				})
+			const base = frameShapes[b0]
 			if (!frameShapes.every((f) => f.length === base.length && f.every((sh, i) => sh.v.length === base[i].v.length && !!sh.c === !!base[i].c)))
 				continue
 			const P = shapePoints(base)
 			// pivot on the shape's centre so position only carries real movement
 			const c = P.reduce((m, q) => [m[0] + q[0] / P.length, m[1] + q[1] / P.length], [0, 0])
 			const stroked = it.some((x) => x.ty === 'st')
-			const fits = []
+			const fits = [], errs = []
 			let ok = true,
 				prev = 0
 			for (const f of frameShapes) {
@@ -1218,6 +1230,7 @@ export function recoverRigidMotion(json, opts = {}) {
 					ok = false
 					break
 				}
+				errs.push(fit.err)
 				if (fit.sx == null) fit.sx = fit.sy = fit.s
 				let deg = (fit.th * 180) / Math.PI
 				while (deg - prev > 180) deg -= 360
@@ -1228,6 +1241,13 @@ export function recoverRigidMotion(json, opts = {}) {
 				fits.push({ p: [co * x - sn * y + fit.tx, sn * x + co * y + fit.ty], r: deg, s: [fit.sx * 100, fit.sy * 100] })
 			}
 			if (!ok) continue
+			// across a gap, turning by Δθ swings a point at radius R off the straight line by R(1 − cos(Δθ/2))
+			const R = Math.max(...P.map((q) => Math.hypot(q[0] - c[0], q[1] - c[1])))
+			const swing = (j) => {
+				const S = Math.max(...fits[j].s, ...fits[j - 1].s, 0) / 100
+				return R * S * (1 - Math.cos((((fits[j].r - fits[j - 1].r) * Math.PI) / 180) / 2))
+			}
+			if (times.some((t, j) => j && t - times[j - 1] > 1 + EPS && swing(j) > tol)) continue
 			const ease = (j) => {
 				const src = paths[0].ks.k[j]
 				const kf = {}
@@ -1237,10 +1257,13 @@ export function recoverRigidMotion(json, opts = {}) {
 			const keys = (get) => ({ a: 1, k: fits.map((f, j) => Object.assign({ t: times[j], s: get(f) }, ease(j))) })
 			tr.a = { a: 0, k: c }
 			tr.p = keys((f) => f.p)
-			tr.r = keys((f) => [f.r])
+			// a turn too small to see (rounding noise in the bake) stays still
+			const r0 = fits.reduce((m, f) => m + f.r, 0) / fits.length
+			const still = fits.every((f, j) => errs[j] + R * (Math.max(...f.s, 0) / 100) * Math.abs(((f.r - r0) * Math.PI) / 180) <= tol)
+			tr.r = still ? { a: 0, k: r0 } : keys((f) => [f.r])
 			if (!stroked) tr.s = keys((f) => f.s)
 			paths.forEach((x) => {
-				x.ks = { a: 0, k: x.ks.k[0].s[0] }
+				x.ks = { a: 0, k: x.ks.k[b0].s[0] }
 			})
 			n++
 		}
@@ -1284,38 +1307,79 @@ export function roundPrecision(json, opts = {}) {
 			p.k = roundDeep(p.k, d)
 			return
 		}
-		for (const kf of p.k) {
-			if (kf.s !== undefined) kf.s = roundDeep(kf.s, d)
+		// an ease that overshoots (y handles past 0–1) multiplies its keys' rounding: a
+		// value moving 0.01 with y 128 really swings 1.3; rounded to 0.1 apart it swings 13
+		const gain = (kf) => {
+			if (!kf || kf.h === 1 || !kf.o || !kf.i) return 1
+			const ys = [0, 1, ...asArray(kf.o.y), ...asArray(kf.i.y)].filter((y) => typeof y === 'number')
+			const lo = Math.min(...ys), hi = Math.max(...ys)
+			return Math.max(Math.abs(1 - lo) + Math.abs(lo), Math.abs(1 - hi) + Math.abs(hi))
+		}
+		p.k.forEach((kf, j) => {
+			const g = Math.max(gain(kf), gain(p.k[j - 1]))
+			if (kf.s !== undefined) kf.s = roundDeep(kf.s, g > 1 + EPS && fixed[kind] == null ? decimalsFor(tolFor(kind) / g) : d)
 			if (kf.e !== undefined) kf.e = roundDeep(kf.e, d)
 			if (kf.to) kf.to = roundDeep(kf.to, dpx)
 			if (kf.ti) kf.ti = roundDeep(kf.ti, dpx)
 			if (kf.i) kf.i = roundDeep(kf.i, 3)
 			if (kf.o) kf.o = roundDeep(kf.o, 3)
 			if (typeof kf.t === 'number') kf.t = roundTo(kf.t, 3)
-		}
+		})
 	})
 	return n
 }
 
 // Removes path points that don't change the outline at the target accuracy: points on a
-// straight line, doubled points and points along a smooth curve, refitting the curve
-// either side. Only still paths; layers with modifiers that work per point (round
-// corners, zig zag, pucker, offset) are left alone.
-// ponytail: still paths only; animated paths would need the same points removed from every key.
+// straight line, doubled points and points along a smooth curve (baked polylines refit as
+// curves), refitting the curve either side. Layers with modifiers that work per point
+// (round corners, zig zag, pucker, offset) are left alone.
+// Animated paths: keys that morph into each other lose the same points together; keys
+// after a hold are drawn on their own and simplify on their own, then every key is padded
+// back to one count (see padShape). Keyframe fitting has already moved animated paths, so
+// each pass gets half the fitting budget there (ANIMATED_PATH_SHARE).
 export function simplifyPaths(json, opts = {}) {
 	let n = 0
 	const perPoint = new Map() // layer -> has a per-point modifier
 	forEachLayerProp(json, opts, BUDGET.fit, (p, key, owner, tolFor, L) => {
 		if (key !== 'ks' && key !== 'pt') return
-		if (isAnimated(p) || !isObj(p.k) || !Array.isArray(p.k.v)) return
 		if (!perPoint.has(L)) perPoint.set(L, /"ty":"(rd|zz|pb|op)"/.test(JSON.stringify(L.shapes || [])))
 		if (perPoint.get(L)) return
+		if (isAnimated(p)) return void (n += simplifyPathKeys(p.k, tolFor('px') * ANIMATED_PATH_SHARE))
+		if (!isObj(p.k) || !Array.isArray(p.k.v)) return
 		const r = simplifyPath(p.k, tolFor('px'))
 		if (!r) return
 		p.k = r.shape
 		n += r.removed
 	})
 	return n
+}
+
+// ponytail: a fixed half-and-half split, even when one of the two passes is off.
+const ANIMATED_PATH_SHARE = 0.5
+
+function simplifyPathKeys(k, tol) {
+	if (!k.every((kf) => Array.isArray(kf.s) && kf.s.length && kf.s.every((sh) => isObj(sh) && Array.isArray(sh.v)))) return 0
+	const shapes = k[0].s.length
+	if (k.some((kf) => kf.s.length !== shapes)) return 0
+	let removed = 0
+	for (let a = 0; a < k.length; ) {
+		let b = a
+		while (b < k.length - 1 && k[b].h !== 1) b++
+		const run = k.slice(a, b + 1)
+		for (let c = 0; c < shapes; c++) {
+			const r = simplifyPathSet(run.map((kf) => kf.s[c]), tol)
+			if (!r) continue
+			run.forEach((kf, j) => (kf.s[c] = r.shapes[j]))
+			removed += r.removed * run.length
+		}
+		a = b + 1
+	}
+	if (removed)
+		for (let c = 0; c < shapes; c++) {
+			const max = Math.max(...k.map((kf) => kf.s[c].v.length))
+			for (const kf of k) padShape(kf.s[c], max)
+		}
+	return removed
 }
 
 // Shape layers with identical content become one precomp used several times. Cavalry
@@ -1637,8 +1701,8 @@ export const PASSES = [
 	{ id: 'recoverRigidMotion', label: 'Turn baked moving shapes back into transforms', group: 'lossy', on: true, run: recoverRigidMotion },
 	{ id: 'equalisePathPoints', label: 'Fix paths whose point count changes', group: 'lossless', on: true, run: equalisePathPoints },
 	{ id: 'holdJumps', label: 'Hold one-frame jumps', group: 'lossless', on: true, run: holdJumps, options: { all: false } },
-	{ id: 'simplifyKeys', label: 'Fit keyframes with curves', group: 'lossy', on: true, run: simplifyKeys },
-	{ id: 'simplifyPaths', label: 'Simplify still paths', group: 'lossy', on: true, run: simplifyPaths },
+	{ id: 'simplifyKeys', label: 'Fit keyframes with curves', group: 'lossy', on: true, run: simplifyKeys, options: { eased: false } },
+	{ id: 'simplifyPaths', label: 'Simplify paths', group: 'lossy', on: true, run: simplifyPaths },
 	{ id: 'roundPrecision', label: 'Round values (decimals per kind)', group: 'lossy', on: true, run: roundPrecision },
 	{ id: 'instanceLayers', label: 'Share identical layers as one precomp', group: 'lossless', on: true, run: instanceLayers },
 	{ id: 'removeDoubledPaints', label: 'Remove doubled fills and strokes', group: 'lossless', on: true, run: removeDoubledPaints },

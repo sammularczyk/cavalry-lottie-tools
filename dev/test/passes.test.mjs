@@ -227,13 +227,25 @@ test('recoverRigidMotion: baked spinning, moving square becomes a static path + 
 	tr.s.k.forEach((k) => assert.ok(Math.abs(k.s[0] - 100) < 1e-6))
 })
 
-test('recoverRigidMotion: skips real deformation and eased (non-baked) keys', () => {
+test('recoverRigidMotion: skips real deformation and turning between spaced keys', () => {
 	const warped = Array.from({ length: 4 }, (_, t) => { const sq = square(0, 0, 0); sq.v[0] = [-5 - t * 4, -5]; return kf(t, [sq], linKey) })
 	const spaced = [kf(0, [square(0, 0, 0)], linKey), kf(10, [square(0, 0, 90)])]
 	for (const keys of [warped, spaced]) {
 		const g = { ty: 'gr', it: [{ ty: 'sh', ks: { a: 1, k: keys } }, { ty: 'tr', p: { a: 0, k: [0, 0] } }] }
 		assert.equal(P.recoverRigidMotion({ layers: [layer({ shapes: [g] })] }), 0)
 	}
+})
+
+test('recoverRigidMotion: spaced eased keys that only move and scale, growing from a point', () => {
+	const ease = { i: { x: 0.6, y: 1.4 }, o: { x: 0.3, y: 0 } }
+	const keys = [kf(0, [square(0, 0, 0, 0)], { h: 1 }), kf(1, [square(5, 5, 0, 0.2)], ease), kf(6, [square(40, 20, 0, 1)], ease), kf(15, [square(60, -10, 0, 0.8)])]
+	const tr = { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 } }
+	const g = { ty: 'gr', it: [{ ty: 'sh', ks: { a: 1, k: keys } }, { ty: 'fl', c: { a: 0, k: [1, 0, 0, 1] } }, tr] }
+	assert.equal(P.recoverRigidMotion({ layers: [layer({ shapes: [g] })] }), 1)
+	assert.deepEqual(g.it[0].ks.k.v, square(40, 20, 0, 1).v) // the largest key, not the point
+	assert.equal(tr.r.a, 0)
+	assert.deepEqual(tr.s.k.map((k) => Math.round(k.s[0])), [0, 20, 100, 80])
+	assert.deepEqual(tr.p.k.map((k) => k.s.map(Math.round)), [[0, 0], [5, 5], [40, 20], [60, -10]])
 })
 
 test('simplifyKeys: a baked straight move collapses; the turning point stays', () => {
@@ -247,6 +259,26 @@ test('simplifyKeys: eased keys are never dropped', () => {
 	const p = { a: 1, k: [kf(0, [0], ease), kf(5, [50], ease), kf(10, [100])] }
 	P.simplifyKeys({ layers: [layer({ ks: { o: p } })] })
 	assert.equal(p.k.length, 3)
+})
+
+test('simplifyKeys: opts.eased refits across eased keys that one ease can follow', () => {
+	const near = { o: { x: 0.4, y: 0.38 }, i: { x: 0.6, y: 0.62 } } // all but linear
+	const keys = () => ({ a: 1, k: [kf(0, [0], near), kf(5, [50], near), kf(10, [100])] })
+	const kept = keys(), refit = keys()
+	P.simplifyKeys({ layers: [layer({ ks: { o: kept } })] }, { accuracy: 1 })
+	P.simplifyKeys({ layers: [layer({ ks: { o: refit } })] }, { accuracy: 1, eased: true })
+	assert.equal(kept.k.length, 3)
+	assert.equal(refit.k.length, 2)
+})
+
+test('roundPrecision: keys either side of an overshooting ease keep more decimals', () => {
+	// moves 0.01 but the ease swings ×128: rounded to 0.1 apart it would swing 10× as far
+	const keys = (o, i) => ({ a: 1, k: [{ t: 0, s: [165.55, 0], o, i }, { t: 20, s: [165.54, 0] }] })
+	const steep = keys({ x: 0.35, y: 128.5 }, { x: 0.65, y: 89.7 }), plain = keys({ x: 0.3, y: 0 }, { x: 0.7, y: 1 })
+	const j = { layers: [layer({ ks: { p: steep } }), layer({ ind: 2, ks: { p: plain } })] }
+	P.roundPrecision(j, { accuracy: 1 })
+	assert.deepEqual(steep.k.map((k) => k.s[0]), [165.55, 165.54])
+	assert.deepEqual(plain.k.map((k) => k.s[0]), [165.6, 165.5])
 })
 
 test('roundPrecision: decimals by kind of value', () => {
@@ -383,6 +415,15 @@ test('simplifyKeys: baked motion along an arc gets a motion path', () => {
 	assert.equal(typeof p.k[0].o.x, 'number') // lottie-web reads motion-path eases as numbers
 })
 
+test('fitMotionPath: no ease that dips below 0 (lottie-web jumps to the segment end)', () => {
+	// along a quarter circle from a standstill: the least-squares ease lands just under 0
+	const us = Array.from({ length: 21 }, (_, j) => j / 20)
+	const prog = (u) => F.easeAt({ x1: 0.7, y1: 0, x2: 0.3, y2: 1 }, u)
+	const pts = us.map((u) => [100 * Math.cos((prog(u) * Math.PI) / 2), 100 * Math.sin((prog(u) * Math.PI) / 2)])
+	const f = F.fitMotionPath(us, pts, 0.5)
+	assert.ok(f && f.ease.y1 >= 0 && f.ease.y2 >= 0, JSON.stringify(f && f.ease))
+})
+
 test('accuracy is on screen: a layer drawn 10× larger keeps finer values', () => {
 	const make = (s) => ({ layers: [layer({ ks: { s: { a: 0, k: [s, s] }, o: { a: 0, k: 100 } }, shapes: [{ ty: 'sh', ks: { a: 0, k: { c: false, v: [[1.23456, 0], [5, 5]], i: [[0, 0], [0, 0]], o: [[0, 0], [0, 0]] } } }] })] })
 	const a = make(100), b = make(1000)
@@ -427,6 +468,40 @@ test('simplifyPaths: a circle drawn with 16 points refits to fewer, staying on t
 	const ks = { a: 0, k: { c: true, v, i, o } }
 	P.simplifyPaths({ layers: [layer({ shapes: [{ ty: 'sh', ks }] })] })
 	assert.ok(ks.k.v.length <= 6, ks.k.v.length + ' points')
+})
+
+test('simplifyPaths: a baked superellipse polyline refits as curves on every key, morphs in step', () => {
+	const blob = (w, h, n = 200) => {
+		const v = Array.from({ length: n }, (_, q) => {
+			const a = (q / n) * 2 * Math.PI, c = Math.cos(a), s = Math.sin(a)
+			return [w * Math.sign(c) * Math.abs(c) ** 0.5, h * Math.sign(s) * Math.abs(s) ** 0.5] // exponent 4
+		})
+		return { c: true, v, i: v.map(() => [0, 0]), o: v.map(() => [0, 0]) }
+	}
+	const keys = [{ t: 0, h: 1, s: [blob(200, 100)] }, { t: 1, s: [blob(300, 150)] }, { t: 10, s: [blob(320, 160)] }]
+	const before = keys.map((kf) => kf.s[0])
+	const ks = { a: 1, k: JSON.parse(JSON.stringify(keys)) }
+	assert.ok(P.simplifyPaths({ layers: [layer({ shapes: [{ ty: 'sh', ks }] })] }, { accuracy: 1 }) > 0)
+	const counts = ks.k.map((kf) => kf.s[0].v.length)
+	assert.ok(counts.every((c) => c === counts[0]) && counts[0] <= 24, counts.join())
+	// every key stays on its original outline, both ways (tolerance: 1 px × fit share × half)
+	const curve = (sh) => sh.v.flatMap((p, j) => {
+		const b = (j + 1) % sh.v.length, q = sh.v[b], c1 = [p[0] + sh.o[j][0], p[1] + sh.o[j][1]], c2 = [q[0] + sh.i[b][0], q[1] + sh.i[b][1]]
+		return Array.from({ length: 32 }, (_, n) => {
+			const t = n / 32, r = 1 - t
+			return [0, 1].map((x) => r * r * r * p[x] + 3 * r * r * t * c1[x] + 3 * r * t * t * c2[x] + t * t * t * q[x])
+		})
+	})
+	const toSeg = (p, a, b) => {
+		const d = [b[0] - a[0], b[1] - a[1]], l = d[0] ** 2 + d[1] ** 2
+		const t = l ? Math.max(0, Math.min(1, ((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / l)) : 0
+		return Math.hypot(p[0] - a[0] - d[0] * t, p[1] - a[1] - d[1] * t)
+	}
+	const near = (a, b) => Math.max(...a.map((p) => Math.min(...b.map((q, n) => toSeg(p, q, b[(n + 1) % b.length])))))
+	ks.k.forEach((kf, j) => {
+		const A = curve(before[j]), B = curve(kf.s[0])
+		assert.ok(Math.max(near(A, B), near(B, A)) <= 0.36, 'key ' + j)
+	})
 })
 
 // ---------- structure ----------

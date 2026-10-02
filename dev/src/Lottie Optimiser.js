@@ -20,7 +20,7 @@ var PREF_KEY = 'lottieTools_exporter' // old key kept so saved settings carry ov
 
 // Options that can change how the animation looks or which apps can use it. Everything
 // else is lossless and always on (hidden), so saved settings can't switch it off.
-var ADVANCED = ['precomps', 'recoverRigidMotion', 'simplifyKeys', 'simplifyPaths', 'roundPrecision', 'holdAll', 'stripNames', 'embedImages', 'jpegImages', 'pretty']
+var ADVANCED = ['precomps', 'recoverRigidMotion', 'simplifyKeys', 'simplifyPaths', 'roundPrecision', 'holdAll', 'refitEased', 'stripNames', 'embedImages', 'jpegImages', 'pretty']
 var ALWAYS = { exponent: true }
 PASSES.forEach(function (p) {
 	if (ADVANCED.indexOf(p.id) < 0) ALWAYS[p.id] = p.on
@@ -31,19 +31,19 @@ var PRESETS = [
 		label: 'Safe',
 		detail: 'Looks identical · keeps names for apps',
 		tip: 'Looks identical to Cavalry, and keeps layer names for apps that change colours or text from code. For mobile apps and anything you’re unsure of.',
-		values: { accuracy: 0, precomps: true, recoverRigidMotion: true, simplifyKeys: true, simplifyPaths: true, roundPrecision: true, holdAll: false, stripNames: false, embedImages: true, jpegImages: false, pretty: false },
+		values: { accuracy: 0, precomps: true, recoverRigidMotion: true, simplifyKeys: true, simplifyPaths: true, roundPrecision: true, holdAll: false, refitEased: false, stripNames: false, embedImages: true, jpegImages: false, pretty: false },
 	},
 	{
 		label: 'Smaller',
 		detail: 'Under ¼ px of difference · keeps names',
 		tip: 'Nothing moves more than ¼ px, which you can’t see. Keeps layer names.',
-		values: { accuracy: 1, precomps: true, recoverRigidMotion: true, simplifyKeys: true, simplifyPaths: true, roundPrecision: true, holdAll: false, stripNames: false, embedImages: true, jpegImages: false, pretty: false },
+		values: { accuracy: 1, precomps: true, recoverRigidMotion: true, simplifyKeys: true, simplifyPaths: true, roundPrecision: true, holdAll: false, refitEased: false, stripNames: false, embedImages: true, jpegImages: false, pretty: false },
 	},
 	{
 		label: 'Extreme',
 		detail: 'Smallest · up to 1 px · no names · JPEG',
 		tip: 'Smallest file: up to 1 px of difference on sharp edges, no layer names, and opaque images saved as JPEG. Not for apps that find layers by name.',
-		values: { accuracy: 3, precomps: true, recoverRigidMotion: true, simplifyKeys: true, simplifyPaths: true, roundPrecision: true, holdAll: false, stripNames: true, embedImages: true, jpegImages: true, pretty: false },
+		values: { accuracy: 3, precomps: true, recoverRigidMotion: true, simplifyKeys: true, simplifyPaths: true, roundPrecision: true, holdAll: false, refitEased: false, stripNames: true, embedImages: true, jpegImages: true, pretty: false },
 	},
 ]
 
@@ -57,7 +57,7 @@ function currentPreset() {
 }
 
 function defaults() {
-	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, precomps: true, bakeMode: 0, tab: 0, accuracy: 1, display: 0, format: 0, embedImages: true, jpegImages: false, advancedOpen: false, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
+	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, refitEased: false, precomps: true, bakeMode: 0, tab: 0, accuracy: 1, display: 0, format: 0, embedImages: true, jpegImages: false, advancedOpen: false, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
 	PASSES.forEach(function (p) {
 		s[p.id] = p.on
 	})
@@ -127,7 +127,7 @@ var TIPS = {
 	holdJumps: ['Phones and 120 Hz screens draw frames in between yours. A value that snaps from one frame to the next would slide; this keeps it a snap, as in Cavalry.', 'Snaps stay snaps on fast screens'],
 	recoverRigidMotion: ['Baked duplicators and deformers store every shape again on every frame. Copies that only move, turn or scale become one shape plus an animated transform. Usually the biggest saving.', 'Turns baked shapes back into motion'],
 	simplifyKeys: ['Baked motion has a keyframe on every frame. Replaces runs of them with a few eased keys that follow the same motion, checked every half frame: shapes morphing, things moving along curves (as motion paths), fades and colours. Stays within the accuracy you pick.', 'Baked keys → a few smooth keys'],
-	simplifyPaths: ['Removes points from still shapes that don’t change the outline: points on straight edges, doubled points and extra points along curves, which are refitted. Corners stay. Skipped on layers with round corners, zig zag, pucker or offset.', 'Fewer points, same outline'],
+	simplifyPaths: ['Removes points that don’t change the outline: points on straight edges, doubled points and extra points along curves, which are refitted; baked outlines made of many short straight lines become a few curves. Animated shapes too, on every key, still morphing point to point. Corners stay. Skipped on layers with round corners, zig zag, pucker or offset.', 'Fewer points, same outline'],
 	roundPrecision: ['Rounds every number to the fewest decimals you can’t see at your accuracy, worked out per layer from how big it’s drawn.', 'Rounds to invisible precision'],
 }
 
@@ -221,6 +221,7 @@ function exportSelected() {
 	if (r.pivots || r.baked) note += (note ? ' · ' : '') + (r.pivots + r.baked) + ' position(s) corrected'
 	if (r.masks) note += (note ? ' · ' : '') + r.masks + ' mask(s) rebuilt'
 	if (r.trackMattes) note += (note ? ' · ' : '') + r.trackMattes + ' track matte(s)'
+	if (r.fills) note += (note ? ' · ' : '') + r.fills + ' fill effect(s)'
 	if (r.warnings && r.warnings.length) note += (note ? '\n' : '') + '⚠ ' + r.warnings.join('\n⚠ ')
 	return { json: r.json, dirs: r.dirs, note: note }
 }
@@ -313,6 +314,7 @@ function checkFile() {
 
 var ROW_TEXT = {
 	precomps: ['Comp references as precomps', 'Writes each comp once and reuses it, so nested comps keep animating with the right timing. Also fixes positions Cavalry’s exporter gets wrong around pivots. Turn off to use Cavalry’s export unchanged.', 'Fixes nested comps, timing and pivots'],
+	refitEased: ['Experimental: refit eased keys', 'Keyframe fitting also replaces keys that already have eases, staying within your accuracy every half frame. For particles and simulations Cavalry exports as many eased keys; can halve them. Replaces eases you set by hand, and optimising takes longer.', 'Fewer keys, eases not kept'],
 	holdAll: ['Hold every frame-by-frame key', 'Plays exactly Cavalry’s frames, with no in-between frames on fast screens. Smooth baked motion will step at your comp’s frame rate.', 'Exact frames, no in-betweens'],
 	stripNames: ['Strip layer and shape names', 'Smaller file. Leave off if a developer changes colours or text from code, since apps find layers by name.', 'Leave off if apps find layers by name'],
 	embedImages: ['Embed images in the file', 'Puts images inside the JSON, so it’s one file to hand over. Images grow by a third when embedded. Off: images are saved in an images folder next to the file. A .lottie always holds its images.', 'One file, nothing to lose'],
@@ -472,6 +474,7 @@ function passSettings() {
 	})
 	if (settings.stripMeta) o.stripMeta = { names: settings.stripNames }
 	if (settings.holdJumps) o.holdJumps = { all: settings.holdAll }
+	if (settings.simplifyKeys) o.simplifyKeys = { eased: settings.refitEased }
 	return o
 }
 

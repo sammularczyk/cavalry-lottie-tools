@@ -216,12 +216,20 @@ export function fitMotionPath(us, pts, tol) {
 		}
 		return bez(P, (lo + (d - L[lo]) / Math.max(L[hi] - L[lo], EPS)) / N)
 	}
+	// lottie-web can't go back past a motion path's start: progress below 0 (an ease
+	// handle under 0) jumps to the segment's end. Handles at or above 0 never dip below.
+	const atLeast0 = (e) => (e.y1 < 0 || e.y2 < 0 ? Object.assign({}, e, { y1: Math.max(0, e.y1), y2: Math.max(0, e.y2) }) : e)
 	const err = (e) => {
 		let worst = 0
 		for (let j = 0; j < pts.length; j++) worst = Math.max(worst, len(sub(pointAt(easeAt(e, us[j])), pts[j])))
 		return worst
 	}
-	const ease = fitEase(us, fracs, err, tol)
+	let ease = fitEase(us, fracs, err, tol)
+	if (ease && ease !== atLeast0(ease)) {
+		const fixed = atLeast0(ease)
+		ease = err(fixed) <= tol ? fixed : fitEase(us, fracs, (e) => err(atLeast0(e)), tol)
+		ease = ease && atLeast0(ease)
+	}
 	return ease && { ease, to: sub(P[1], A), ti: sub(P[2], B) }
 }
 
@@ -235,50 +243,98 @@ const unit = (p) => {
 
 // Removes vertices from a Lottie path ({c, v, i, o}; tangents relative to their vertex)
 // while it stays within tol of the original everywhere. Neighbours keep their tangent
-// directions, so corners stay corners. Vertex 0 stays (trim paths and dashes start there).
-// -> { shape, removed } or null.
+// directions, so corners stay corners; a point with no handles (a baked polyline) may
+// instead take the outline's direction there, so dense straight segments refit as curves.
+// Vertex 0 stays (trim paths and dashes start there). -> { shape, removed } or null.
 export function simplifyPath(shape, tol) {
-	const n = shape.v.length
-	const closed = !!shape.c
-	if (n < 3) return null
-	const v = shape.v.map((p) => p.slice()), I = shape.i.map((p) => p.slice()), O = shape.o.map((p) => p.slice())
+	const r = simplifyPathSet([shape], tol)
+	return r && { shape: r.shapes[0], removed: r.removed }
+}
+
+// Direction of the original outline v at vertex j, from its neighbours (doubled points
+// skipped); one-sided at an open path's ends.
+function tangentAt(v, j, closed) {
+	const n = v.length
+	const step = (d) => {
+		for (let s = 1; s < n; s++) {
+			const q = j + d * s
+			if (!closed && (q < 0 || q >= n)) return v[j]
+			const p = v[(q + n) % n]
+			if (len(sub(p, v[j])) > EPS) return p
+		}
+		return v[j]
+	}
+	return unit(sub(step(1), step(-1)))
+}
+
+// simplifyPath for several paths with the same points (keys of a morph): a vertex goes
+// only if it can go from every one, so they still morph point to point. Each keeps its
+// own handles. -> { shapes, removed } (removed per path) or null.
+export function simplifyPathSet(shapes, tol) {
+	const n = shapes[0].v.length
+	const closed = !!shapes[0].c
+	if (n < 3 || shapes.some((sh) => sh.v.length !== n || !!sh.c !== closed)) return null
 	const segPts = (vv, ii, oo, a, b) => [vv[a], add(vv[a], oo[a]), add(vv[b], ii[b]), vv[b]]
 	const nSeg = closed ? n : n - 1
-	const orig = Array.from({ length: nSeg }, (_, j) => sample(segPts(v, I, O, j, (j + 1) % n), 12))
-	const idx = v.map((_, j) => j)
+	const st = shapes.map((sh) => {
+		const v = sh.v.map((p) => p.slice()), I = sh.i.map((p) => p.slice()), O = sh.o.map((p) => p.slice())
+		const orig = Array.from({ length: nSeg }, (_, j) => {
+			const b = (j + 1) % n
+			return sample(segPts(v, I, O, j, b), isZero(O[j]) && isZero(I[b]) ? 1 : 12)
+		})
+		return { v, I, O, orig, v0: sh.v }
+	})
+	const idx = st[0].v.map((_, j) => j)
+	// handle directions to try leaving a (sign 1) or arriving at b (sign -1), from that
+	// end's own handle if it has one, else smooth through it, else straight at its neighbour
+	const dirs = (s, j, sign, own, other, toward) => {
+		if (!isZero(own)) return [unit(own)]
+		const t = tangentAt(s.v0, idx[j], closed)
+		const smooth = isZero(other) ? t && mul(t, sign) : unit(mul(other, -1))
+		return [smooth, ...toward.map((q) => unit(sub(q, s.v[j])))].filter(Boolean).slice(0, 2)
+	}
+	// new handles [C1, C2] for the segment a..b replacing a..k..b in one path, or null
+	const refit = (s, a, k, b) => {
+		const { v, I, O, orig } = s
+		const S = []
+		for (let j = idx[a]; j !== idx[b]; j = (j + 1) % n) S.push(...(S.length ? orig[j].slice(1) : orig[j]))
+		const P0 = v[a], P3 = v[b]
+		const left = segPts(v, I, O, a, k), right = segPts(v, I, O, k, b)
+		if (isZero(O[a]) && isZero(I[k]) && isZero(O[k]) && isZero(I[b]) && polyDistance(S, [P0, P3]) <= tol) return [P0, P3] // straight lines stay straight
+		for (const d1 of dirs(s, a, 1, O[a], I[a], [left[2], left[3]]))
+			for (const d2 of dirs(s, b, -1, I[b], O[b], [right[1], right[0]])) {
+				const fit = fitAlongTangents(S, P0, P3, d1, d2)
+				if (!fit) continue
+				const C1 = add(P0, mul(d1, fit[0])), C2 = add(P3, mul(d2, fit[1]))
+				if (polyDistance(S, sample([P0, C1, C2, P3], 24)) <= tol) return [C1, C2]
+			}
+		return null
+	}
 	let removed = 0
 	for (let changed = true; changed; ) {
 		changed = false
-		for (let k = 1; k < v.length - (closed ? 0 : 1); k++) {
-			if (v.length <= (closed ? 3 : 2)) break
-			const a = k - 1, b = (k + 1) % v.length
-			const S = []
-			for (let j = idx[a]; j !== idx[b]; j = (j + 1) % n) S.push(...(S.length ? orig[j].slice(1) : orig[j]))
-			const P0 = v[a], P3 = v[b]
-			const left = segPts(v, I, O, a, k), right = segPts(v, I, O, k, b)
-			let C1, C2
-			if (isZero(O[a]) && isZero(I[k]) && isZero(O[k]) && isZero(I[b])) {
-				C1 = P0 // straight lines stay straight
-				C2 = P3
-			} else {
-				const d1 = unit(sub(left[1], P0)) || unit(sub(left[2], P0)) || unit(sub(left[3], P0))
-				const d2 = unit(sub(right[2], P3)) || unit(sub(right[1], P3)) || unit(sub(right[0], P3))
-				if (!d1 || !d2) continue
-				const fit = fitAlongTangents(S, P0, P3, d1, d2)
-				if (!fit) continue
-				C1 = add(P0, mul(d1, fit[0]))
-				C2 = add(P3, mul(d2, fit[1]))
+		for (let k = 1; k < idx.length - (closed ? 0 : 1); k++) {
+			if (idx.length <= (closed ? 3 : 2)) break
+			const a = k - 1, b = (k + 1) % idx.length
+			const fits = []
+			for (const s of st) {
+				const f = refit(s, a, k, b)
+				if (!f) break
+				fits.push(f)
 			}
-			if (polyDistance(S, sample([P0, C1, C2, P3], 24)) > tol) continue
-			O[a] = sub(C1, P0)
-			I[b] = sub(C2, P3)
-			for (const arr of [v, I, O, idx]) arr.splice(k, 1)
+			if (fits.length < st.length) continue
+			st.forEach((s, j) => {
+				s.O[a] = sub(fits[j][0], s.v[a])
+				s.I[b] = sub(fits[j][1], s.v[b])
+				for (const arr of [s.v, s.I, s.O]) arr.splice(k, 1)
+			})
+			idx.splice(k, 1)
 			removed++
 			changed = true
 			k--
 		}
 	}
-	return removed ? { shape: Object.assign({}, shape, { v, i: I, o: O }), removed } : null
+	return removed ? { shapes: shapes.map((sh, j) => Object.assign({}, sh, { v: st[j].v, i: st[j].I, o: st[j].O })), removed } : null
 }
 
 // Handle lengths along fixed directions d1 (from P0) and d2 (from P3) fitting pts.

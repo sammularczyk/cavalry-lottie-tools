@@ -77,9 +77,17 @@ export const FEATURES = [
 		id: 'effects',
 		label: 'Layer effects',
 		on: 'layer',
-		detect: (L) => Array.isArray(L.ef) && L.ef.some((e) => e.ty !== 5), // ty 5: expression controls, data only
+		detect: (L) => Array.isArray(L.ef) && L.ef.some((e) => e.ty !== 5 && e.ty !== 21), // ty 5: expression controls, data only
 		support: { ...each(['webCanvas', 'webLight', 'iosCA', 'iosMT', 'rlottie'], 'dropped'), android: 'partial' },
 		note: 'Canvas and light builds ignore effects; Android draws drop shadow and blur only, iOS drop shadow only.',
+	},
+	{
+		id: 'fillEffect',
+		label: 'Fill effect',
+		on: 'layer',
+		detect: (L) => Array.isArray(L.ef) && L.ef.some((e) => e.ty === 21),
+		support: each(['webCanvas', 'webLight', 'android', 'iosCA', 'iosMT', 'rlottie'], 'dropped'),
+		note: 'From Cavalry’s Fill filter. Only lottie-web SVG, ThorVG and Skottie draw it; elsewhere layers keep their own colours.',
 	},
 	{
 		id: 'luma',

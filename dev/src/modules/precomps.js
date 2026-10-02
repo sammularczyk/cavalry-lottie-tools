@@ -118,6 +118,31 @@ function sceneRotationScale(L, id) {
 	return changed
 }
 
+// The writer always exports skew as 0. Cavalry's skew.x is a shear factor, not an angle:
+// x moves by skew·y (measured: 0.2618 shears by 0.2618, not tan 15°). Lottie's sk is an
+// angle in degrees whose tan is the shear, along axis 0; the sign agrees once y is flipped.
+// ponytail: skew.y isn't written (Lottie has one skew per axis); warn if it turns up. Driven skew is read at the current frame.
+function sceneSkew(L, id, warn) {
+	if (!L.ks || !api.hasAttribute(id, 'skew')) return false
+	const deg = (v) => (Math.atan(v) * 180) / Math.PI
+	const sk = api.get(id, 'skew') || {}
+	if (Math.abs(sk.y || 0) > 1e-6 || (api.getAnimatedAttributes(id) || []).indexOf('skew.y') >= 0) warn('Vertical skew on ' + api.getNiceName(id) + ' isn’t exported')
+	const keyed = (api.getAnimatedAttributes(id) || []).indexOf('skew.x') >= 0
+	if (!keyed && Math.abs(sk.x || 0) < 1e-6) return false
+	L.ks.sk = keyed ? sceneKeys(id, 'skew.x', deg) : { a: 0, k: deg(sk.x) }
+	L.ks.sa = { a: 0, k: 0 }
+	return true
+}
+
+// Cavalry fills with Even Odd by default (fillRule 0); the writer writes no rule, so Lottie
+// uses nonzero, and shapes cut by overlapping contours (a star made of a square and four
+// rounded rects) fill solid.
+function sceneFillRule(L, id) {
+	if (!L.shapes || !api.hasAttribute(id, 'fillRule') || api.get(id, 'fillRule') !== 0) return
+	const walk = (items) => items.forEach((it) => (it.ty === 'fl' || it.ty === 'gf' ? (it.r = 2) : it.ty === 'gr' && walk(it.it || [])))
+	walk(L.shapes)
+}
+
 // Lottie properties a scene attribute was written to, on one exported layer.
 function lottieProps(L, attr) {
 	const ks = L.ks || {}
@@ -161,6 +186,8 @@ function lottieProps(L, attr) {
 			return sub('tm', 'e')
 		case 'stroke.trimTravel':
 			return sub('tm', 'o')
+		case 'generator.cornerRadius':
+			return sub('rc', 'r')
 		case 'inputPath':
 			return sub('sh', 'ks')
 		default:
@@ -171,6 +198,29 @@ function lottieProps(L, attr) {
 // The writer drops hold (step) interpolation: a value Cavalry holds and then snaps
 // (the dreidel lines' stroke width) fades across the gap instead. Hold the Lottie key
 // wherever the scene key is a hold.
+// The writer clamps eases to 0–1, so an overshooting one loses its overshoot (a corner
+// radius that dips past its end value and settles back went straight there, and the
+// star cut from those corners no longer met them). Where a 1-D Lottie property carries the
+// scene attribute's keys, each segment takes the scene's ease.
+function sceneEases(L, id) {
+	let n = 0
+	for (const attr of api.getAnimatedAttributes(id) || []) {
+		const ids = api.getKeyframeIdsForAttribute(id, attr)
+		for (const p of lottieProps(L, attr).filter(isAnimated)) {
+			if (p.k.length !== ids.length || p.k.some((kf, j) => kf.t !== api.get(ids[j], 'frame') || (kf.s && kf.s.length !== 1))) continue
+			p.k.forEach((kf, j) => {
+				if (j === p.k.length - 1 || kf.h === 1) return
+				const e = easeBetween(ids[j], ids[j + 1])
+				if (e.h) return
+				kf.o = e.o
+				kf.i = e.i
+				n++
+			})
+		}
+	}
+	return n
+}
+
 function sceneHolds(L, id) {
 	let n = 0
 	for (const attr of api.getAnimatedAttributes(id) || []) {
@@ -365,17 +415,58 @@ function ease(ox, oy, ix, iy, x) {
 	return bz(oy, iy, t)
 }
 
-// A layer's own transform at t as an affine map: p + R·S·(x − a).
-function layerMatrix(ks, t) {
+// A layer's own transform at t as an affine map: p + R·K·S·(x − a), K the skew (as lottie-web).
+// ponytail: skew axis (sa) assumed 0, which is all sceneSkew writes.
+export function layerMatrix(ks, t) {
 	const p = ks.p && ks.p.s ? [valueAt(ks.p.x, t)[0], valueAt(ks.p.y, t)[0]] : valueAt(ks.p, t) || [0, 0]
 	const a = valueAt(ks.a, t) || [0, 0],
 		s = valueAt(ks.s, t) || [100, 100],
-		r = (((valueAt(ks.r, t) || [0])[0] || 0) * Math.PI) / 180
+		r = (((valueAt(ks.r, t) || [0])[0] || 0) * Math.PI) / 180,
+		k = Math.tan((((valueAt(ks.sk, t) || [0])[0] || 0) * Math.PI) / 180)
 	const c = Math.cos(r), sn = Math.sin(r), sx = s[0] / 100, sy = s[1] / 100
 	// [m00 m01 m10 m11 tx ty]
-	const m = [c * sx, -sn * sy, sn * sx, c * sy]
+	const m = [c * sx, (-c * k - sn) * sy, sn * sx, (c - sn * k) * sy]
 	return [m[0], m[1], m[2], m[3], p[0] - (m[0] * a[0] + m[1] * a[1]), p[1] - (m[2] * a[0] + m[3] * a[1])]
 }
+// lottie-web clips a matted layer to its path bounds (strokes excluded) plus 10%, so a
+// straight stroked line (zero height) vanishes under any matte, and strokes near the bounds
+// are cut. An invisible rect over the stroked bounds keeps them in.
+// ponytail: group transforms are read at frame 0; bake per key if animated groups turn up.
+export function padMatteBounds(L) {
+	let b = null, sw = 0
+	const grow = (M, x, y) => {
+		const q = [M[0] * x + M[1] * y + M[4], M[2] * x + M[3] * y + M[5]]
+		b = b ? [Math.min(b[0], q[0]), Math.min(b[1], q[1]), Math.max(b[2], q[0]), Math.max(b[3], q[1])] : [q[0], q[1], q[0], q[1]]
+	}
+	const values = (p) => (!p ? [] : isAnimated(p) ? p.k.map((k) => k.s).filter((v) => v !== undefined) : [p.k])
+	const walk = (items, M) => {
+		const tr = items.find((x) => x.ty === 'tr')
+		if (tr) M = mul(M, layerMatrix(tr, 0))
+		for (const it of items) {
+			if (it.ty === 'gr') walk(it.it || [], M)
+			else if (it.ty === 'sh') {
+				for (const v of values(it.ks))
+					for (const sh of Array.isArray(v) ? v : [v]) if (sh && sh.v) sh.v.forEach((q, i) => (grow(M, q[0], q[1]), grow(M, q[0] + sh.i[i][0], q[1] + sh.i[i][1]), grow(M, q[0] + sh.o[i][0], q[1] + sh.o[i][1])))
+			} else if (it.ty === 'rc' || it.ty === 'el') for (const c of values(it.p)) for (const s of values(it.s)) grow(M, c[0] - s[0] / 2, c[1] - s[1] / 2), grow(M, c[0] + s[0] / 2, c[1] + s[1] / 2)
+			else if (it.ty === 'st' || it.ty === 'gs') sw = Math.max(sw, ...values(it.w).map((w) => (Array.isArray(w) ? w[0] : w) * Math.sqrt(Math.abs(M[0] * M[3] - M[1] * M[2]))))
+		}
+	}
+	walk(L.shapes || [], [1, 0, 0, 1, 0, 0])
+	// the 10% margin covers a stroke's half width once each side is 5 widths long
+	if (!b || !sw || Math.min(b[2] - b[0], b[3] - b[1]) >= 5 * sw) return false
+	const still = (k) => ({ a: 0, k })
+	L.shapes.push({
+		ty: 'gr',
+		nm: 'Matte bounds',
+		it: [
+			{ ty: 'rc', d: 1, p: still([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]), s: still([b[2] - b[0] + 2 * sw, b[3] - b[1] + 2 * sw]), r: still(0) },
+			{ ty: 'fl', c: still([0, 0, 0, 1]), o: still(0), r: 1 },
+			{ ty: 'tr', p: still([0, 0]), a: still([0, 0]), s: still([100, 100]), r: still(0), o: still(100) },
+		],
+	})
+	return true
+}
+
 const mul = (A, B) => [A[0] * B[0] + A[1] * B[2], A[0] * B[1] + A[1] * B[3], A[2] * B[0] + A[3] * B[2], A[2] * B[1] + A[3] * B[3], A[0] * B[4] + A[1] * B[5] + A[4], A[2] * B[4] + A[3] * B[5] + A[5]]
 function invertApply(M, [x, y]) {
 	const det = M[0] * M[3] - M[1] * M[2]
@@ -608,6 +699,70 @@ function sourceShapes(id) {
 	return out
 }
 
+// ---------- fill filters ----------
+// Cavalry's writer drops filters. A Fill filter becomes After Effects' Fill effect, written
+// the way bodymovin writes it (players read Color and Opacity by index). A filter on a
+// group draws over the group's render; Lottie effects on a parent don't reach its children,
+// so it goes on every drawing layer under the filtered one (same as masks).
+
+// Fill filters on a scene layer, in order: [fill id].
+function sceneFills(id) {
+	return (api.getInConnectedAttributes(id) || [])
+		.filter((a) => /^filters\.\d+$/.test(a))
+		.map((a) => String(api.getInConnection(id, a)).replace(/\.id$/, ''))
+		.filter((f) => api.getLayerType(f) === 'fill')
+}
+
+// fillColor as Lottie [r, g, b, 1] (0..1) and its alpha as 0..1; animated when keyed.
+// Channels keyed at the same frames with the same eases keep the scene's keys; otherwise
+// one key per frame over [from, to].
+// ponytail: a driven (connected) fillColor is read at the current frame only.
+export function fillProps(channels, from, to) {
+	const at = (t) => channels.map((P) => (valueAt(P, t) || [0])[0])
+	const anim = channels.filter(isAnimated)
+	if (!anim.length) {
+		const v = at(0)
+		return { color: { a: 0, k: [v[0], v[1], v[2], 1] }, opacity: { a: 0, k: v[3] } }
+	}
+	const ease = (kf) => JSON.stringify([kf.h, kf.o, kf.i])
+	const ref = anim[0].k
+	const shared = anim.every((P) => P.k.length === ref.length && P.k.every((kf, j) => kf.t === ref[j].t && ease(kf) === ease(ref[j])))
+	const frames = shared ? ref : []
+	if (!shared) for (let t = from; t <= to; t++) frames.push({ t, o: { x: [0], y: [0] }, i: { x: [1], y: [1] } })
+	const keys = (pick) =>
+		frames.map((f, j) => {
+			const kf = { t: f.t, s: pick(at(f.t)) }
+			if (j < frames.length - 1) for (const k of ['h', 'o', 'i']) if (f[k] !== undefined) kf[k] = f[k]
+			return kf
+		})
+	const prop = (pick, i) => (channels.slice(...i).some(isAnimated) ? { a: 1, k: keys(pick) } : { a: 0, k: pick(at(0)) })
+	const opacity = prop((v) => [v[3]], [3, 4])
+	if (!opacity.a) opacity.k = opacity.k[0] // sliders hold a plain number
+	return { color: prop((v) => [v[0], v[1], v[2], 1], [0, 3]), opacity }
+}
+
+// L and every layer parented under it that draws something (not nulls, not empty shape layers).
+function drawingUnder(layers, L) {
+	const drawing = (q) => (q.ty !== 4 ? q.ty !== 3 : /"ty":"(sh|rc|el|sr)"/.test(JSON.stringify(q.shapes || [])))
+	const under = (q) => [q].concat(...layers.filter((c) => c.parent === q.ind).map(under))
+	return under(L).filter(drawing)
+}
+
+function fillEffect(color, opacity) {
+	const p = (ty, nm, n, v) => ({ ty, nm, mn: 'ADBE Fill-000' + n, ix: 0, v })
+	const ef = [
+		p(10, 'Fill Mask', 1, { a: 0, k: 0 }),
+		p(7, 'All Masks', 7, { a: 0, k: 0 }),
+		p(2, 'Color', 2, color),
+		p(7, 'Invert', 6, { a: 0, k: 0 }),
+		p(0, 'Horizontal Feather', 3, { a: 0, k: 0 }),
+		p(0, 'Vertical Feather', 4, { a: 0, k: 0 }),
+		p(0, 'Opacity', 5, opacity),
+	]
+	ef.forEach((e, i) => (e.ix = i + 1))
+	return { ty: 21, nm: 'Fill', np: 9, mn: 'ADBE Fill', ix: 1, en: 1, ef }
+}
+
 // Cavalry writes some static values as an animated property with one key, which stops
 // lottie-web drawing the layer at all; store those as static.
 export function staticSingleKeys(node) {
@@ -692,6 +847,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 		baked = 0,
 		maskCount = 0,
 		trackMattes = 0,
+		fills = 0,
 		refs = 0,
 		next = 0
 	const userComp = api.getActiveComp(),
@@ -774,11 +930,15 @@ export function exportWithPrecomps(compId, opts = {}) {
 			if (!id) continue
 			sceneTransformKeys(L, id)
 			sceneRotationScale(L, id)
+			sceneSkew(L, id, (w) => warnings.push(w))
 			if (L.ty !== 0) sceneOpacity(L, id)
+			sceneEases(L, id)
 			sceneHolds(L, id)
 		}
 		inheritOpacity(exported.layers, api.get(comp, 'startFrame'), last)
 		repair(comp, exported, sceneOf)
+		addFills(comp, exported, sceneOf) // before mattes, so matte copies carry them
+		for (const L of exported.layers) if (sceneOf.get(L)) sceneFillRule(L, sceneOf.get(L))
 		buildTrackMattes(comp, exported, sceneOf, plan)
 		return exported
 	}
@@ -799,9 +959,6 @@ export function exportWithPrecomps(compId, opts = {}) {
 		}
 		let ind = Math.max(0, ...layers.map((L) => L.ind || 0)) + 1
 		const used = new Set(), assetFor = new Map()
-		const kids = (L) => layers.filter((q) => q.parent === L.ind)
-		const drawing = (L) => (L.ty !== 4 ? L.ty !== 3 : /"ty":"(sh|rc|el|sr)"/.test(JSON.stringify(L.shapes || [])))
-		const under = (L) => [L].concat(...kids(L).map(under))
 		for (const job of plan.jobs) {
 			const key = job.sources.slice().sort().join('+')
 			if (!assetFor.has(key)) {
@@ -827,16 +984,39 @@ export function exportWithPrecomps(compId, opts = {}) {
 			const refId = assetFor.get(key)
 			if (!refId) continue
 			for (const T of layers.filter((L) => sceneOf.get(L) === job.target))
-				for (const D of under(T).filter(drawing)) {
+				for (const D of drawingUnder(layers, T)) {
 					if (D.tt || used.has(D)) continue
 					layers.splice(layers.indexOf(D), 0, { ty: 0, ind: ind++, nm: 'Matte', refId, td: 1, ip: D.ip, op: D.op, st: 0, sr: 1, w, h, ks: {} })
 					D.tt = job.tt
+					padMatteBounds(D)
 					trackMattes++
 				}
 		}
 		// sources that were hidden were only exported for their mattes
 		const hiddenSrc = (L) => plan.unhide.some((q) => within(sceneOf.get(L), q))
 		exported.layers = layers.filter((L) => !used.has(L) || !hiddenSrc(L) || layers.some((q) => q.parent === L.ind && !used.has(q)))
+	}
+
+	function addFills(comp, exported, sceneOf) {
+		const from = api.get(comp, 'startFrame'), to = api.get(comp, 'endFrame')
+		const byInd = new Map(exported.layers.map((L) => [L.ind, L]))
+		const depth = (L) => (byInd.has(L.parent) ? 1 + depth(byInd.get(L.parent)) : 0)
+		// deepest first: a layer's own fill runs before its group's, as in Cavalry
+		for (const L of exported.layers.slice().sort((a, b) => depth(b) - depth(a))) {
+			const id = sceneOf.get(L)
+			if (!id) continue
+			for (const f of sceneFills(id)) {
+				const anim = api.getAnimatedAttributes(f) || []
+				const still = api.get(f, 'fillColor')
+				const channels = ['r', 'g', 'b', 'a'].map((c) => (anim.indexOf('fillColor.' + c) >= 0 ? sceneKeys(f, 'fillColor.' + c, (v) => v / 255) : { a: 0, k: still[c] / 255 }))
+				const { color, opacity } = fillProps(channels, from, to)
+				if (api.get(f, 'blendMode') !== 3) warnings.push('The Fill filter on ' + api.getNiceName(id) + ' uses a blend mode Lottie’s Fill effect lacks; it exports as Normal')
+				for (const D of drawingUnder(exported.layers, L)) {
+					D.ef = (D.ef || []).concat(JSON.parse(JSON.stringify(fillEffect(color, opacity))))
+					fills++
+				}
+			}
+		}
 	}
 
 	// Check every layer's anchor against the scene and correct or bake its position.
@@ -885,12 +1065,9 @@ export function exportWithPrecomps(compId, opts = {}) {
 				}
 				paths[src] = byFrame
 			}
-			const kids = (L) => exported.layers.filter((q) => q.parent === L.ind)
-			const drawing = (L) => L.ty !== 4 ? L.ty !== 3 : /"ty":"(sh|rc|el|sr)"/.test(JSON.stringify(L.shapes || []))
-			const under = (L) => [L].concat(...kids(L).map(under))
 			for (const [L, ms] of masked) {
 				const withPaths = ms.map((m) => ({ mode: m.mode, paths: paths[m.id] || {} })).filter((m) => Object.keys(m.paths).length)
-				maskCount += applyMasks(withPaths, under(L).filter(drawing), res.parentMatrix)
+				maskCount += applyMasks(withPaths, drawingUnder(exported.layers, L), res.parentMatrix)
 			}
 		}
 		api.setFrame(time) // leave the comp showing the frame it was on
@@ -904,5 +1081,5 @@ export function exportWithPrecomps(compId, opts = {}) {
 		api.setFrame(userFrame)
 	}
 	json.assets = (json.assets || []).concat(assets)
-	return { json, dirs, warnings, precomps: assets.length, refs, pivots, baked, masks: maskCount, trackMattes }
+	return { json, dirs, warnings, precomps: assets.length, refs, pivots, baked, masks: maskCount, trackMattes, fills }
 }
