@@ -162,7 +162,7 @@ test('formatNumber / serialise round-trip exactly', () => {
 test('optimise: reports bytes per pass and never grows the file', () => {
 	const j = {
 		v: '5.7.0', fr: 25, ip: 0, op: 50, w: 100, h: 100, meta: { a: 'Cavalry' },
-		layers: [layer({ nm: 'L', ks: { o: { a: 1, k: [kf(0, [100], ease), kf(10, [100], ease), kf(20, [100])] }, p: { a: 0, k: [50, 50, 0] } } })],
+		layers: [layer({ nm: 'L', ks: { o: { a: 1, k: [kf(0, [100], ease), kf(10, [100], ease), kf(20, [100])] }, p: { a: 0, k: [50, 50, 0] } }, shapes: [{ ty: 'sh', ks: { a: 0, k: { v: [[0, 0]], i: [[0, 0]], o: [[0, 0]], c: false } } }] })],
 		assets: [{ id: 'unused', p: 'x.png', u: '', e: 0 }],
 	}
 	const r = P.optimise(j, { exponent: true })
@@ -260,4 +260,47 @@ test('holdJumps holds the key before a one-frame jump, leaves smooth runs and sp
 	const q = { a: 1, k: [0, 1, 2].map((v, t) => kf(t, [v], { ...lin })) }
 	P.holdJumps({ layers: [layer({ ks: { o: q } })] }, { all: true })
 	assert.deepEqual(q.k.map((k) => k.h), [1, 1, undefined])
+})
+
+import { valueAt } from '../src/modules/precomps.js'
+
+// World matrix of a layer at t, Lottie semantics, up the parent chain.
+function worldOf(layers, L, t) {
+	const by = Object.fromEntries(layers.map((l) => [l.ind, l]))
+	const m = (ks) => {
+		const p = ks.p && ks.p.s ? [valueAt(ks.p.x, t)[0], valueAt(ks.p.y, t)[0]] : valueAt(ks.p, t) || [0, 0]
+		const a = valueAt(ks.a, t) || [0, 0], s = valueAt(ks.s, t) || [100, 100], r = (((valueAt(ks.r, t) || [0])[0] || 0) * Math.PI) / 180
+		const c = Math.cos(r), sn = Math.sin(r), M = [c * s[0] / 100, -sn * s[1] / 100, sn * s[0] / 100, c * s[1] / 100]
+		return [M[0], M[1], M[2], M[3], p[0] - (M[0] * a[0] + M[1] * a[1]), p[1] - (M[2] * a[0] + M[3] * a[1])]
+	}
+	const mul = (A, B) => [A[0] * B[0] + A[1] * B[2], A[0] * B[1] + A[1] * B[3], A[2] * B[0] + A[3] * B[2], A[2] * B[1] + A[3] * B[3], A[0] * B[4] + A[1] * B[5] + A[4], A[2] * B[4] + A[3] * B[5] + A[5]]
+	let M = [1, 0, 0, 1, 0, 0]
+	for (let l = L; l; l = by[l.parent]) M = mul(m(l.ks || {}), M)
+	return M
+}
+
+test('foldStaticParents removes still, empty parents without moving anything', () => {
+	const lin = { o: { x: [0], y: [0] }, i: { x: [1], y: [1] } }
+	const group = (ind, parent, ks) => ({ ty: 4, ind, parent, ip: 0, op: 10, ks, shapes: [{ ty: 'gr', it: [] }] })
+	const shape = (ind, parent, ks) => ({ ty: 4, ind, parent, ip: 0, op: 10, ks, shapes: [{ ty: 'gr', it: [{ ty: 'sh', ks: { a: 0, k: { v: [[0, 0]], i: [[0, 0]], o: [[0, 0]], c: false } } }] }] })
+	const make = () => [
+		group(1, undefined, { p: { a: 0, k: [300, 200] }, a: { a: 0, k: [10, 5] }, s: { a: 0, k: [150, 150] }, r: { a: 0, k: 30 } }),
+		group(2, 1, { p: { s: true, x: { a: 0, k: 40 }, y: { a: 0, k: -20 } }, s: { a: 0, k: [50, 200] } }), // non-uniform, no rotation
+		shape(3, 2, { p: { s: true, x: { a: 1, k: [kf(0, [0], lin), kf(10, [100])] }, y: { a: 0, k: 7 } }, s: { a: 1, k: [kf(0, [100, 100], lin), kf(10, [60, 60])] } }),
+		shape(4, 1, { p: { a: 1, k: [kf(0, [5, 5, 0], lin), kf(10, [50, -30, 0])] }, r: { a: 1, k: [kf(0, [0], lin), kf(10, [90])] } }),
+		group(5, undefined, { p: { a: 1, k: [kf(0, [0, 0], lin), kf(10, [9, 9])] } }), // moving parent stays
+		shape(6, 5, { p: { a: 0, k: [1, 1] } }),
+	]
+	const before = make(), after = make()
+	const n = P.foldStaticParents({ layers: after })
+	// 2 folds into 3 (non-uniform scale, child doesn't rotate). 1 stays: its child 3 now has
+	// split, animated position under a rotated parent. 5 moves, so it stays.
+	assert.equal(n, 1)
+	assert.deepEqual(after.map((L) => L.ind).sort(), [1, 3, 4, 5, 6])
+	for (const ind of [3, 4, 6])
+		for (const t of [0, 3.5, 10]) {
+			const A = worldOf(before, before.find((l) => l.ind === ind), t)
+			const B = worldOf(after, after.find((l) => l.ind === ind), t)
+			A.forEach((v, i) => assert.ok(Math.abs(v - B[i]) < 1e-6, `layer ${ind} @${t}: ${A} vs ${B}`))
+		}
 })

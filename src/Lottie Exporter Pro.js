@@ -49,6 +49,7 @@ var FATAL = '#e5534b'
 var TIPS = {
 	removeHidden: ['Hidden layers and shapes (hd). Parents and matte sources are kept.', 'Hidden layers and shapes'],
 	removeDeadLayers: ['Layers with an empty time range or opacity 0 the whole time.', 'Never on screen'],
+	foldStaticParents: ['Group layers that draw nothing and never move are folded into their children’s transforms and removed. Cavalry writes every group as a layer, which roughly doubles files.', 'Still groups → merged into children'],
 	removeIdentityNulls: ['Null layers that do not move anything (Cavalry adds one per comp).', 'Nulls that move nothing'],
 	removeUnusedAssets: ['Images and precomps no layer refers to.', 'Nothing refers to them'],
 	dedupeAssets: ['Identical precomps or images become one asset.', 'Identical precomps and images'],

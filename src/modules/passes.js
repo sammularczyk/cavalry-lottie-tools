@@ -394,6 +394,84 @@ export function removeIdentityNulls(json) {
 	return n
 }
 
+// A layer that draws something (shape geometry, precomp, solid, image, text).
+const drawsSomething = (L) => L.ty !== 4 ? L.ty !== 3 : /"ty":"(sh|rc|el|sr)"/.test(JSON.stringify(L.shapes || []))
+
+// Apply fn to a property's value(s): the static value, or every key's s/e.
+function mapValues(p, fn) {
+	if (!p) return p
+	if (!isAnimated(p)) return Object.assign({}, p, { k: fn(asArray(p.k)) })
+	return Object.assign({}, p, { k: p.k.map((kf) => Object.assign({}, kf, kf.s ? { s: fn(kf.s) } : {}, kf.e ? { e: fn(kf.e) } : {})) })
+}
+const staticOf = (p, d) => (p && !isAnimated(p) ? asArray(p.k) : p ? null : d)
+
+// Parent layers that draw nothing and never move (Cavalry exports every group as one)
+// are folded into their children: the child gets the combined transform and the parent
+// goes. Exact when the parent's scale is uniform or the child doesn't rotate; skipped
+// otherwise, and for anything animated in the parent, skew, 3D and auto-orient.
+export function foldStaticParents(json) {
+	let n = 0
+	for (const layers of layerLists(json)) {
+		let changed = true
+		while (changed) {
+			changed = false
+			for (let i = layers.length - 1; i >= 0; i--) {
+				const P = layers[i]
+				if (P.ind == null || drawsSomething(P) || P.td || P.tt || P.ddd === 1 || layers.some((o) => o.tp === P.ind)) continue
+				const ks = P.ks || {}
+				if (JSON.stringify(ks).indexOf('"x":"') >= 0) continue // expressions
+				const pp = ks.p && ks.p.s ? [staticOf(ks.p.x, [0]), staticOf(ks.p.y, [0])] : [staticOf(ks.p, [0, 0])]
+				if (pp.some((v) => !v)) continue
+				const pos = ks.p && ks.p.s ? [pp[0][0], pp[1][0]] : pp[0]
+				const a = staticOf(ks.a, [0, 0]), sc = staticOf(ks.s, [100, 100]), rr = staticOf(ks.r, [0]), sk = staticOf(ks.sk, [0])
+				if (!a || !sc || !rr || !sk || Math.abs(sk[0]) > EPS || ks.rx || ks.ry || ks.rz || ks.or) continue
+				const kids = layers.filter((o) => o.parent === P.ind)
+				const rad = (rr[0] * Math.PI) / 180, c = Math.cos(rad), sn = Math.sin(rad)
+				const sx = (sc[0] != null ? sc[0] : 100) / 100, sy = (sc[1] != null ? sc[1] : sx * 100) / 100
+				const uniform = Math.abs(sx - sy) < EPS
+				const map = (q) => {
+					const X = (q[0] - (a[0] || 0)) * sx, Y = ((q[1] || 0) - (a[1] || 0)) * sy
+					return [pos[0] + c * X - sn * Y, (pos[1] || 0) + sn * X + c * Y]
+				}
+				const ok = kids.every((C) => {
+					const k = C.ks || {}
+					if (C.ao === 1 || C.ddd === 1 || (k.sk && (isAnimated(k.sk) || Math.abs(asArray(k.sk.k)[0] || 0) > EPS))) return false
+					const rotates = k.r && (isAnimated(k.r) || Math.abs(asArray(k.r.k)[0] || 0) > EPS)
+					if (!uniform && rotates) return false
+					if (k.p && k.p.s && (isAnimated(k.p.x) || isAnimated(k.p.y)) && Math.abs(rr[0]) > EPS) return false
+					return !JSON.stringify(k).includes('"x":"')
+				})
+				if (!ok) continue
+				for (const C of kids) {
+					const k = (C.ks = C.ks || {})
+					if (k.p && k.p.s) {
+						if (Math.abs(rr[0]) < EPS) {
+							k.p.x = mapValues(k.p.x, (v) => [pos[0] + (v[0] - (a[0] || 0)) * sx])
+							k.p.y = mapValues(k.p.y, (v) => [(pos[1] || 0) + (v[0] - (a[1] || 0)) * sy])
+						} else {
+							const q = map([asArray(k.p.x.k)[0], asArray(k.p.y.k)[0]])
+							k.p.x = { a: 0, k: q[0] }
+							k.p.y = { a: 0, k: q[1] }
+						}
+					} else {
+						const lin = (v) => [c * v[0] * sx - sn * (v[1] || 0) * sy, sn * v[0] * sx + c * (v[1] || 0) * sy]
+						k.p = mapValues(k.p || { a: 0, k: [0, 0, 0] }, (v) => map(v).concat(v.length > 2 ? [v[2]] : []))
+						if (isAnimated(k.p)) k.p.k.forEach((kf) => ['to', 'ti'].forEach((f) => kf[f] && (kf[f] = lin(kf[f]).concat(kf[f].length > 2 ? [kf[f][2]] : []))))
+					}
+					k.r = mapValues(k.r || { a: 0, k: 0 }, (v) => [v[0] + rr[0]])
+					k.s = mapValues(k.s || { a: 0, k: [100, 100, 100] }, (v) => [v[0] * sx, (v[1] != null ? v[1] : v[0]) * sy].concat(v.length > 2 ? [v[2]] : []))
+					if (P.parent != null) C.parent = P.parent
+					else delete C.parent
+				}
+				layers.splice(i, 1)
+				n++
+				changed = true
+			}
+		}
+	}
+	return n
+}
+
 // Names that expressions look up ("thisComp.layer('Name')", effect('Slider'), ...).
 function namesUsedByExpressions(json) {
 	const names = new Set()
@@ -846,6 +924,7 @@ export function serialise(json, { pretty = false, exponent = false } = {}) {
 export const PASSES = [
 	{ id: 'removeHidden', label: 'Remove hidden layers and shapes', group: 'lossless', on: true, run: removeHidden },
 	{ id: 'removeDeadLayers', label: 'Remove layers that are never visible', group: 'lossless', on: true, run: removeDeadLayers },
+	{ id: 'foldStaticParents', label: 'Fold still group layers into their children', group: 'lossless', on: true, run: foldStaticParents },
 	{ id: 'removeIdentityNulls', label: 'Remove do-nothing null layers', group: 'lossless', on: true, run: removeIdentityNulls },
 	{ id: 'removeUnusedAssets', label: 'Remove unused assets', group: 'lossless', on: true, run: removeUnusedAssets },
 	{ id: 'dedupeAssets', label: 'Merge identical assets', group: 'lossless', on: true, run: dedupeAssets },
