@@ -18,8 +18,46 @@ var PREF_KEY = 'lottieTools_exporter' // old key kept so saved settings carry ov
 
 // ---------- settings ----------
 
+// Options that can change how the animation looks or which apps can use it. Everything
+// else is lossless and always on (hidden), so saved settings can't switch it off.
+var ADVANCED = ['precomps', 'recoverRigidMotion', 'simplifyKeys', 'simplifyPaths', 'roundPrecision', 'holdAll', 'stripNames', 'embedImages', 'jpegImages', 'pretty']
+var ALWAYS = { exponent: true }
+PASSES.forEach(function (p) {
+	if (ADVANCED.indexOf(p.id) < 0) ALWAYS[p.id] = p.on
+})
+
+var PRESETS = [
+	{
+		label: 'Safe',
+		detail: 'Looks identical · keeps names for apps',
+		tip: 'Looks identical to Cavalry, and keeps layer names for apps that change colours or text from code. For mobile apps and anything you’re unsure of.',
+		values: { accuracy: 0, precomps: true, recoverRigidMotion: true, simplifyKeys: true, simplifyPaths: true, roundPrecision: true, holdAll: false, stripNames: false, embedImages: true, jpegImages: false, pretty: false },
+	},
+	{
+		label: 'Smaller',
+		detail: 'Under ¼ px of difference · keeps names',
+		tip: 'Nothing moves more than ¼ px, which you can’t see. Keeps layer names.',
+		values: { accuracy: 1, precomps: true, recoverRigidMotion: true, simplifyKeys: true, simplifyPaths: true, roundPrecision: true, holdAll: false, stripNames: false, embedImages: true, jpegImages: false, pretty: false },
+	},
+	{
+		label: 'Extreme',
+		detail: 'Smallest · up to 1 px · no names · JPEG',
+		tip: 'Smallest file: up to 1 px of difference on sharp edges, no layer names, and opaque images saved as JPEG. Not for apps that find layers by name.',
+		values: { accuracy: 3, precomps: true, recoverRigidMotion: true, simplifyKeys: true, simplifyPaths: true, roundPrecision: true, holdAll: false, stripNames: true, embedImages: true, jpegImages: true, pretty: false },
+	},
+]
+
+function currentPreset() {
+	for (var i = 0; i < PRESETS.length; i++) {
+		var v = PRESETS[i].values, match = true
+		for (var k in v) if (settings[k] !== v[k]) match = false
+		if (match) return i
+	}
+	return PRESETS.length // Custom
+}
+
 function defaults() {
-	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, precomps: true, bakeMode: 0, tab: 0, accuracy: 1, display: 0, format: 0, embedImages: true, jpegImages: false, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
+	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, precomps: true, bakeMode: 0, tab: 0, accuracy: 1, display: 0, format: 0, embedImages: true, jpegImages: false, advancedOpen: false, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
 	PASSES.forEach(function (p) {
 		s[p.id] = p.on
 	})
@@ -34,6 +72,7 @@ function loadSettings() {
 			for (var k in s) if (saved[k] !== undefined && typeof saved[k] === typeof s[k]) s[k] = saved[k]
 		}
 	} catch (e) {}
+	for (var a in ALWAYS) s[a] = ALWAYS[a]
 	return s
 }
 
@@ -93,7 +132,7 @@ var TIPS = {
 }
 
 // A labelled dropdown that stores its index in settings[key].
-function choiceRow(key, title, entries, tip) {
+function choiceRow(key, title, entries, tip, onChange) {
 	var r = new ui.HLayout()
 	r.setMargins(8, 2, 8, 2)
 	r.setSpaceBetween(6)
@@ -108,15 +147,17 @@ function choiceRow(key, title, entries, tip) {
 	d.onValueChanged = function () {
 		settings[key] = d.getValue()
 		save()
+		if (onChange) onChange()
 	}
 	r.add(d)
 	return r
 }
 
-function optionRow(key, title, tip, detail) {
+function optionRow(key, title, tip, detail, onChange) {
 	return toggleRow(title, detail, settings[key], T, function (on) {
 		settings[key] = on
 		save()
+		if (onChange) onChange()
 	}, tip).widget
 }
 
@@ -267,52 +308,103 @@ function checkFile() {
 
 // ---------- export page ----------
 
-var exportPage = page()
-var bakeDrop = new ui.DropDown()
-// Labels follow BAKE_MODES order.
-;['Baking: use each layer’s setting', 'Baking: automatic for every layer', 'Baking: shapes every frame', 'Baking: shapes and colours every frame', 'Baking: one layer per frame (largest)', 'Baking: freeze, no animation'].forEach(function (l) {
-	bakeDrop.addEntry(l)
-})
-bakeDrop.setValue(settings.bakeMode)
-bakeDrop.setToolTip('How Cavalry turns things Lottie can’t describe (duplicators, deformers, behaviours) into keyframes. Applies to this export only; your layers’ settings are put back afterwards. Automatic is usually best; the optimiser shrinks baked frames afterwards.')
-bakeDrop.onValueChanged = function () {
-	settings.bakeMode = bakeDrop.getValue()
-	save()
+var ROW_TEXT = {
+	precomps: ['Comp references as precomps', 'Writes each comp once and reuses it, so nested comps keep animating with the right timing. Also fixes positions Cavalry’s exporter gets wrong around pivots. Turn off to use Cavalry’s export unchanged.', 'Fixes nested comps, timing and pivots'],
+	holdAll: ['Hold every frame-by-frame key', 'Plays exactly Cavalry’s frames, with no in-between frames on fast screens. Smooth baked motion will step at your comp’s frame rate.', 'Exact frames, no in-betweens'],
+	stripNames: ['Strip layer and shape names', 'Smaller file. Leave off if a developer changes colours or text from code, since apps find layers by name.', 'Leave off if apps find layers by name'],
+	embedImages: ['Embed images in the file', 'Puts images inside the JSON, so it’s one file to hand over. Images grow by a third when embedded. Off: images are saved in an images folder next to the file. A .lottie always holds its images.', 'One file, nothing to lose'],
+	jpegImages: ['Save opaque images as JPEG', 'Images with no transparency are saved as JPEG (85% quality) when that’s smaller. Slight JPEG softening. macOS only; Cavalry asks you to trust the script the first time.', 'Smaller, slightly softer'],
+	pretty: ['Pretty print', 'Spaced out so people can read it. Much larger; use for debugging only.', 'Readable, much larger'],
 }
-exportPage.add(bakeDrop)
-exportPage.add(
-	optionRow(
-		'precomps',
-		'Comp references as precomps',
-		'Writes each comp once and reuses it, so nested comps keep animating with the right timing. Also fixes positions Cavalry’s exporter gets wrong around pivots. Turn off to use Cavalry’s export unchanged.',
-		'Fixes nested comps, timing and pivots'
-	)
-)
-
-exportPage.add(section('Optimise', T))
-var opts = list(260, T)
-;['lossless', 'lossy'].forEach(function (group) {
-	opts.layout.add(label(group === 'lossy' ? 'Near-lossless · changes you can’t see' : 'Lossless · nothing changes on screen', 10, T.muted))
-	if (group === 'lossy') {
-		opts.layout.add(choiceRow('accuracy', 'Accuracy', ACCURACY, 'The most anything may move from the original, in pixels on screen. Balanced can’t be seen; Smallest can, just, on sharp edges up close.'))
-		opts.layout.add(choiceRow('display', 'Plays at', DISPLAY, 'The size the animation is shown at, compared to the comp. Smaller means less detail is needed, so files get smaller. Pick the largest size it’s ever shown at.'))
-	}
-	PASSES.forEach(function (p) {
-		var tip = TIPS[p.id] || [p.label, '']
-		if (p.group === group) opts.layout.add(optionRow(p.id, p.label, tip[0], tip[1]))
-	})
+PASSES.forEach(function (p) {
+	if (!ROW_TEXT[p.id] && TIPS[p.id]) ROW_TEXT[p.id] = [p.label, TIPS[p.id][0], TIPS[p.id][1]]
 })
-opts.layout.add(optionRow('holdAll', 'Hold every frame-by-frame key', 'Plays exactly Cavalry’s frames, with no in-between frames on fast screens. Smooth baked motion will step at your comp’s frame rate.', 'Exact frames, no in-betweens'))
-opts.layout.add(label('Images', 10, T.muted))
-opts.layout.add(optionRow('embedImages', 'Embed images in the file', 'Puts images inside the JSON, so it’s one file to hand over. Images grow by a third when embedded. Off: images are saved in an images folder next to the file.', 'One file, nothing to lose'))
-opts.layout.add(optionRow('jpegImages', 'Save opaque images as JPEG', 'Images with no transparency are saved as JPEG (85% quality) when that’s smaller. Slight JPEG softening. macOS only; Cavalry asks you to trust the script the first time.', 'Smaller, slightly softer'))
-opts.layout.add(label('Output', 10, T.muted))
-opts.layout.add(choiceRow('format', 'Save as', FORMATS, 'Lottie JSON plays everywhere. dotLottie is the same animation zipped with its images: usually a fifth of the size, for LottieFiles players, the dotLottie runtimes, and lottie-android / lottie-ios. Not lottie-web on its own.'))
-opts.layout.add(optionRow('stripNames', 'Strip layer and shape names', 'Smaller file. Leave off if a developer changes colours or text from code, since apps find layers by name.', 'Leave off if apps find layers by name'))
-opts.layout.add(optionRow('exponent', 'Short number format', 'Writes tiny and huge numbers in short form. Every player reads it.', '0.000001 → 1e-6'))
-opts.layout.add(optionRow('pretty', 'Pretty print', 'Spaced out so people can read it. Much larger; use for debugging only.', 'Readable, much larger'))
-opts.layout.addStretch()
-exportPage.add(opts.widget)
+
+var exportPage = page()
+
+// preset, then the two choices that depend on where the file is going
+var presetRow = new ui.HLayout()
+presetRow.setSpaceBetween(6)
+presetRow.add(label('Preset', 12, T.text))
+presetRow.addStretch()
+var presetDrop = new ui.DropDown()
+PRESETS.forEach(function (p) {
+	presetDrop.addEntry(p.label)
+})
+presetDrop.addEntry('Custom')
+presetRow.add(presetDrop)
+exportPage.add(presetRow)
+var presetDetail = label('', 10, T.muted)
+exportPage.add(presetDetail)
+exportPage.add(choiceRow('format', 'Save as', FORMATS, 'Lottie JSON plays everywhere. dotLottie is the same animation zipped with its images: usually a fifth of the size, for LottieFiles players, the dotLottie runtimes, and lottie-android / lottie-ios. Not lottie-web on its own.'))
+exportPage.add(choiceRow('display', 'Plays at', DISPLAY, 'The size the animation is shown at, compared to the comp. Smaller means less detail is needed, so files get smaller. Pick the largest size it’s ever shown at.'))
+
+// Advanced: everything a preset sets, rebuilt whenever a preset changes it
+var advHead = row('', null, T, { tip: 'Every option the presets set. Changing one makes the preset Custom.' })
+exportPage.add(advHead.widget)
+var adv = list(250, T)
+exportPage.add(adv.widget)
+
+function showPreset() {
+	var i = currentPreset()
+	presetDrop.setValue(i)
+	presetDetail.setText(i < PRESETS.length ? PRESETS[i].detail : 'Your own mix of the Advanced options')
+	presetDrop.setToolTip(i < PRESETS.length ? PRESETS[i].tip : 'Your own mix of the Advanced options. Pick a preset to reset them.')
+}
+
+function buildAdvanced() {
+	adv.layout.clear() // rebuilt, not reparented (Easey: reparenting rows breaks them)
+	var bake = new ui.DropDown()
+	// Labels follow BAKE_MODES order.
+	;['Baking: use each layer’s setting', 'Baking: automatic for every layer', 'Baking: shapes every frame', 'Baking: shapes and colours every frame', 'Baking: one layer per frame (largest)', 'Baking: freeze, no animation'].forEach(function (l) {
+		bake.addEntry(l)
+	})
+	bake.setValue(settings.bakeMode)
+	bake.setToolTip('How Cavalry turns things Lottie can’t describe (duplicators, deformers, behaviours) into keyframes. Applies to this export only; your layers’ settings are put back afterwards. Automatic is usually best; the optimiser shrinks baked frames afterwards.')
+	bake.onValueChanged = function () {
+		settings.bakeMode = bake.getValue()
+		save()
+	}
+	adv.layout.add(bake)
+	adv.layout.add(choiceRow('accuracy', 'Accuracy', ACCURACY, 'The most anything may move from the original, in pixels on screen. Balanced can’t be seen; Smallest can, just, on sharp edges up close.', showPreset))
+	ADVANCED.forEach(function (key) {
+		var t = ROW_TEXT[key] || [key, '', '']
+		adv.layout.add(optionRow(key, t[0], t[1], t[2], showPreset))
+	})
+	adv.layout.add(button('Deselect all', false, function () {
+		ADVANCED.forEach(function (key) {
+			settings[key] = false
+		})
+		save()
+		buildAdvanced()
+		showPreset()
+	}, T).widget)
+	adv.layout.addStretch()
+}
+
+function showAdvanced() {
+	advHead.title.setText((settings.advancedOpen ? '▾  ' : '▸  ') + 'Advanced')
+	adv.widget.setHidden(!settings.advancedOpen)
+}
+advHead.widget.onMousePress = function () {
+	settings.advancedOpen = !settings.advancedOpen
+	save()
+	showAdvanced()
+}
+
+presetDrop.onValueChanged = function () {
+	var i = presetDrop.getValue()
+	if (i >= PRESETS.length) return showPreset() // Custom isn't a preset to apply
+	var v = PRESETS[i].values
+	for (var k in v) settings[k] = v[k]
+	save()
+	buildAdvanced()
+	showPreset()
+}
+
+buildAdvanced()
+showPreset()
+showAdvanced()
 
 var exportRow = new ui.HLayout()
 exportRow.setSpaceBetween(6)
@@ -323,6 +415,39 @@ exportRow.add(button('Optimise file…', false, function () {
 	guarded(runOptimiseFile)
 }, T).widget)
 exportPage.add(exportRow)
+
+// ---------- report page ----------
+
+var reportPage = page()
+var reportHead = section('Last export', T)
+reportPage.add(reportHead)
+var reportList = list(380, T)
+reportList.layout.add(label('Export or optimise a file to see what each step saved.', 11, T.muted))
+reportList.layout.addStretch()
+reportPage.add(reportList.widget)
+
+var PASS_LABEL = {}
+PASSES.forEach(function (p) {
+	PASS_LABEL[p.id] = p.label
+})
+
+// report: optimise()'s [{id, bytes, changes}], plus lines for the saved files
+function showReport(name, report, saved) {
+	reportHead.setText('LAST EXPORT · ' + name.toUpperCase())
+	reportList.layout.clear()
+	var first = report[0].bytes, last = report[report.length - 1].bytes
+	reportList.layout.add(row(kb(first) + ' → ' + kb(last), Math.round(100 - (100 * last) / first) + '% smaller as JSON', T).widget)
+	saved.forEach(function (line) {
+		reportList.layout.add(row(line, null, T).widget)
+	})
+	reportList.layout.add(label('What each step saved', 10, T.muted))
+	for (var i = 1; i < report.length - 1; i++) {
+		var r = report[i], saving = report[i - 1].bytes - r.bytes
+		if (!r.changes && !saving) continue
+		reportList.layout.add(row(PASS_LABEL[r.id] || r.id, (saving >= 0 ? '−' : '+') + kb(Math.abs(saving)) + ' · ' + r.changes + ' change' + (r.changes === 1 ? '' : 's'), T).widget)
+	}
+	reportList.layout.addStretch()
+}
 
 // ---------- run ----------
 
@@ -386,6 +511,7 @@ function optimiseAndWrite(json, out, extra, dirs) {
 		summary(issues, showResults(issues, api.getFileNameFromPath(out, true))),
 	])
 	status.setText(lines.join('\n'))
+	showReport(api.getFileNameFromPath(out, true), r, saved)
 	var changed = r.filter(function (x) {
 		return x.changes
 	})
@@ -417,10 +543,12 @@ function runExport() {
 var pages = new ui.PageView()
 pages.add(preflight)
 pages.add(exportPage)
+pages.add(reportPage)
 var tabs = tabStrip(
 	[
 		{ label: 'Preflight', icon: 'preflight' },
 		{ label: 'Export', icon: 'export' },
+		{ label: 'Report', icon: 'report' },
 	],
 	function (i) {
 		pages.setPage(i)
@@ -429,7 +557,7 @@ var tabs = tabStrip(
 	},
 	T
 )
-var startTab = settings.tab === 1 ? 1 : 0
+var startTab = settings.tab === 1 || settings.tab === 2 ? settings.tab : 0
 pages.setPage(startTab)
 tabs.setSelected(startTab)
 

@@ -49,14 +49,33 @@ test('removeRedundantKeys: spatial flat run is kept (curve can leave and return)
 	assert.equal(p.k.length, 3)
 })
 
-test('trimToLayerRange: keeps one key each side, skips parents', () => {
+test('trimToLayerRange: keeps one key each side; parents keep keys while a child is visible', () => {
 	const keys = () => ({ a: 1, k: [0, 10, 20, 30, 40, 50].map((t) => kf(t, [t], lin)) })
 	const child = layer({ ind: 2, parent: 1, ip: 15, op: 35, ks: { o: keys() } })
-	const parent = layer({ ind: 1, ip: 15, op: 35, ks: { o: keys() } })
+	const parent = layer({ ind: 1, ty: 3, ip: 0, op: 20, ks: { o: keys() } })
 	const j = { layers: [child, parent] }
-	assert.equal(P.trimToLayerRange(j), 2)
+	P.trimToLayerRange(j)
 	assert.deepEqual(child.ks.o.k.map((k) => k.t), [10, 20, 30, 40])
-	assert.equal(parent.ks.o.k.length, 6)
+	assert.deepEqual(parent.ks.o.k.map((k) => k.t), [0, 10, 20, 30, 40]) // own 0..20 plus the child's 15..35
+})
+
+test('trimToLayerRange / removeDeadLayers: a precomp only keeps the inner frames it shows', () => {
+	const keys = () => ({ a: 1, k: [0, 10, 20, 30, 40, 50, 60].map((t) => kf(t, [t], lin)) })
+	const inner = layer({ ind: 1, ip: 0, op: 100, ks: { o: keys() } })
+	const unseen = layer({ ind: 2, ip: 70, op: 100 })
+	// shown for outer frames 0..10, offset so inner frames 20..30 play
+	const shifted = { ty: 0, ind: 1, refId: 'c', ip: 0, op: 10, st: -20, ks: {} }
+	const j = { fr: 10, ip: 0, op: 10, assets: [{ id: 'c', layers: [inner, unseen] }], layers: [shifted] }
+	P.removeDeadLayers(j)
+	P.trimToLayerRange(j)
+	assert.deepEqual(j.assets[0].layers.map((L) => L.ind), [1])
+	assert.deepEqual(inner.ks.o.k.map((k) => k.t), [20, 30]) // the window lands on keys 20 and 30
+	// time remapped: tm (seconds) holds inner frame 40, so only the keys around 40 stay
+	const inner2 = layer({ ind: 1, ip: 0, op: 100, ks: { o: keys() } })
+	const remap = { ty: 0, ind: 1, refId: 'c', ip: 0, op: 10, st: 0, tm: { a: 0, k: 4 }, ks: {} }
+	const j2 = { fr: 10, ip: 0, op: 10, assets: [{ id: 'c', layers: [inner2] }], layers: [remap] }
+	P.trimToLayerRange(j2)
+	assert.deepEqual(inner2.ks.o.k.map((k) => k.t), [40, 50])
 })
 
 test('trimToLayerRange: keys are in comp time even when st is offset', () => {

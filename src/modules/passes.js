@@ -156,17 +156,108 @@ function onLine(prev, cur, next) {
 	return a.every((v, d) => Math.abs(v + (c[d] - v) * u - b[d]) < 1e-6)
 }
 
-// 4. Keys outside a layer's visible time range, keeping one on each side.
+// A scalar property's value at frame t (time remap needs it).
+function valueAt(p, t) {
+	if (!isAnimated(p)) return Number(asArray(p.k)[0])
+	const k = p.k
+	const v = (kf) => Number(asArray(kf.s !== undefined ? kf.s : kf.e)[0])
+	if (t <= k[0].t) return v(k[0])
+	for (let j = 0; j < k.length - 1; j++) {
+		const a = k[j], b = k[j + 1]
+		if (t >= b.t) continue
+		const A = v(a), B = b.s !== undefined ? v(b) : Number(asArray(a.e)[0])
+		if (a.h === 1) return A
+		const u = (t - a.t) / (b.t - a.t)
+		if (!a.o || !a.i) return A + (B - A) * u
+		return A + (B - A) * easeAt({ x1: component(a.o.x, 0), y1: component(a.o.y, 0), x2: component(a.i.x, 0), y2: component(a.i.y, 0) }, u)
+	}
+	return v(k[k.length - 1])
+}
+
+// The frames each layer list is ever seen at, as [from, to]: the root's ip..op, and for
+// a precomp the inner frames its references show (through st, sr and time remapping,
+// across nested precomps). Lists that are never shown get no window.
+// ponytail: one span per precomp (gaps between references are kept); split into
+// intervals if precomps shown in far-apart pieces matter.
+function visibleWindows(json) {
+	const root = json.layers || []
+	const lists = new Map((json.assets || []).filter((a) => Array.isArray(a.layers)).map((a) => [a.id, a.layers]))
+	const fr = json.fr || 30
+	const top = [json.ip != null ? json.ip : -Infinity, json.op != null ? json.op : Infinity]
+	let win = new Map([[root, top]])
+	for (let pass = 0; pass < 16; pass++) {
+		const next = new Map([[root, top]])
+		for (const [list, w] of win)
+			for (const L of list) {
+				if (L.ty !== 0 || !lists.has(L.refId)) continue
+				const a = Math.max(L.ip != null ? L.ip : -Infinity, w[0]), b = Math.min(L.op != null ? L.op : Infinity, w[1])
+				if (!(b > a) || !isFinite(a) || !isFinite(b)) continue
+				let lo, hi
+				if (L.tm) {
+					lo = Infinity
+					hi = -Infinity
+					const times = []
+					for (let t = a; t <= b; t += 0.5) times.push(t)
+					if (isAnimated(L.tm)) for (const kf of L.tm.k) if (kf.t >= a && kf.t <= b) times.push(kf.t)
+					for (const t of times) {
+						const f = valueAt(L.tm, t) * fr
+						lo = Math.min(lo, f)
+						hi = Math.max(hi, f)
+					}
+					hi += 1 // a remapped frame is shown for the frame after it too
+				} else {
+					const st = L.st || 0, sr = L.sr || 1
+					lo = (a - st) / sr
+					hi = (b - st) / sr
+				}
+				const inner = lists.get(L.refId), had = next.get(inner)
+				next.set(inner, had ? [Math.min(had[0], lo), Math.max(had[1], hi)] : [lo, hi])
+			}
+		const same = next.size === win.size && [...next].every(([l, w]) => win.has(l) && win.get(l)[0] === w[0] && win.get(l)[1] === w[1])
+		win = next
+		if (same) break
+	}
+	return win
+}
+
+// Each layer's visible span: its ip..op inside its list's window; a parent's also covers
+// its children's, since they read its transform whenever they're visible.
+function visibleSpans(layers, w) {
+	const span = new Map()
+	for (const L of layers) {
+		const from = Math.max(L.ip != null ? L.ip : -Infinity, w[0]), to = Math.min(L.op != null ? L.op : Infinity, w[1])
+		span.set(L, to > from ? [from, to] : null)
+	}
+	const byInd = new Map(layers.map((L) => [L.ind, L]))
+	for (let pass = 0, changed = true; changed && pass < 64; pass++) {
+		changed = false
+		for (const L of layers) {
+			const P = L.parent != null && byInd.get(L.parent)
+			const c = span.get(L)
+			if (!P || !c) continue
+			const p = span.get(P)
+			const u = p ? [Math.min(p[0], c[0]), Math.max(p[1], c[1])] : c
+			if (!p || u[0] !== p[0] || u[1] !== p[1]) (span.set(P, u), (changed = true))
+		}
+	}
+	return span
+}
+
+// Keyframes outside the frames a layer is ever seen at go, keeping one on each side: its
+// in/out points inside the frames its comp is shown at (a precomp only shows the inner
+// frames its references reach, after time remapping), and for a parent, while any child
+// is visible. Keyframe times are in the layer's comp time, like ip/op.
 export function trimToLayerRange(json) {
 	let n = 0
+	const windows = visibleWindows(json)
 	for (const layers of layerLists(json)) {
-		// a parent's transform is still read while its children are visible
-		const parents = new Set(layers.map((L) => L.parent).filter((v) => v != null))
+		const w = windows.get(layers)
+		if (!w) continue // never shown: removeUnusedAssets / removeDeadLayers deal with it
+		const spans = visibleSpans(layers, w)
 		for (const L of layers) {
-			if (L.ip == null || L.op == null || L.tm || parents.has(L.ind)) continue
-			// layer keyframes are in the parent comp's time, like ip/op (st only shifts a precomp's contents)
-			const from = L.ip,
-				to = L.op
+			const sp = spans.get(L)
+			if (!sp) continue
+			const [from, to] = sp
 			const trim = (p) => {
 				if (!isAnimated(p)) return
 				const k = p.k
@@ -189,6 +280,7 @@ export function trimToLayerRange(json) {
 			forEachProp(L.shapes, trim)
 			forEachProp(L.masksProperties, trim)
 			forEachProp(L.ef, trim)
+			if (L.tm) trim(L.tm)
 		}
 	}
 	return n
@@ -231,14 +323,19 @@ export function removeHidden(json) {
 // 6. Layers that can never be seen: empty time range, or static opacity 0.
 export function removeDeadLayers(json) {
 	let n = 0
+	const windows = visibleWindows(json)
 	for (const layers of layerLists(json)) {
 		const keep = referencedIndices(layers)
+		const w = windows.get(layers)
 		for (let i = layers.length - 1; i >= 0; i--) {
 			const L = layers[i]
 			if (L.td || keep.has(L.ind)) continue
 			const o = L.ks && L.ks.o
 			const invisible = o && !isAnimated(o) && !o.x && Number(asArray(o.k)[0]) === 0
-			const empty = L.ip != null && L.op != null && L.op <= L.ip
+			// never inside the frames its comp is shown at (a precomp's reached inner frames)
+			const from = Math.max(L.ip != null ? L.ip : -Infinity, w ? w[0] : -Infinity)
+			const to = Math.min(L.op != null ? L.op : Infinity, w ? w[1] : Infinity)
+			const empty = (L.ip != null && L.op != null && L.op <= L.ip) || (w && !(to > from))
 			if (invisible || empty) {
 				layers.splice(i, 1)
 				n++

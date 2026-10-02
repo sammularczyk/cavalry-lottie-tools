@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Optimiser: keys and layers never on screen go: each comp's visible frames are worked out through precomp time offsets, stretch and time remapping (nested too), and parents keep keys while any child is visible.
+- Optimiser panel: Safe / Smaller / Extreme presets; Save as and Plays at up front; the rest under a collapsible Advanced section with Deselect all. Lossless steps are always on and hidden.
+- Optimiser panel: Report tab with what each step saved.
 - Optimiser: default transform values (0 position/anchor, 100% scale and opacity, no rotation) are left out; every player fills them in. A shape group keeps its opacity (lottie-web canvas needs it).
 - Optimiser: save as dotLottie (.lottie, version 2) with images packed in i/, or both; zipped in plain JS, so no shell tools or trust prompt.
 - Optimiser: the summary shows the gzipped size a web server would send.

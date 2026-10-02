@@ -175,6 +175,21 @@ export var ICONS = {
 			p.lineTo(9, 4)
 		},
 	},
+	report: {
+		width: 12,
+		height: 12,
+		strokeWidth: 1.5,
+		build: function (p) {
+			p.moveTo(1, 11)
+			p.lineTo(11, 11)
+			p.moveTo(3, 9)
+			p.lineTo(3, 5)
+			p.moveTo(6, 9)
+			p.lineTo(6, 2)
+			p.moveTo(9, 9)
+			p.lineTo(9, 6)
+		},
+	},
 	preflight: {
 		width: 12,
 		height: 12,
