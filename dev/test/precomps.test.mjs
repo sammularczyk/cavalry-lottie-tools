@@ -129,3 +129,13 @@ test('padMatteBounds widens a straight stroked line so lottie-web’s matte mask
 	assert.deepEqual([rc.p.k, rc.s.k], [[500, 50], [1034, 34]])
 	assert.equal(padMatteBounds(layer([[0, 0], [1000, 0], [1000, 1000]], 17)), false) // roomy: left alone
 })
+
+test('padMatteBounds covers a line whose group moves', () => {
+	const still = (k) => ({ a: 0, k })
+	const v = [[0, 50], [100, 50]]
+	const p = { a: 1, k: [{ t: 0, s: [0, 0], o: { x: [0], y: [0] }, i: { x: [1], y: [1] } }, { t: 10, s: [0, 300] }] }
+	const L = { shapes: [{ ty: 'gr', it: [{ ty: 'sh', ks: still({ c: false, v, i: v.map(() => [0, 0]), o: v.map(() => [0, 0]) }) }, { ty: 'st', w: still(4) }, { ty: 'tr', p, a: still([0, 0]), s: still([100, 100]), r: still(0), o: still(100) }] }] }
+	assert.equal(padMatteBounds(L), true)
+	const rc = L.shapes[1].it[0]
+	assert.deepEqual([rc.p.k, rc.s.k], [[50, 200], [108, 308]]) // y 50..350, plus the stroke
+})

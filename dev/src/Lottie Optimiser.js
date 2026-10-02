@@ -12,7 +12,7 @@ import { packImages } from './modules/images.js'
 import { gzipSize, zip, utf8, base64 } from './modules/zip.js'
 import { exportWithPrecomps } from './modules/precomps.js'
 
-var GITHUB_REPO = 'phillip-motion/cavalry-lottie-tools' // ponytail: confirm owner before first release
+var GITHUB_REPO = 'sammularczyk/cavalry-lottie-tools'
 var SCRIPT_NAME = 'Lottie Optimiser'
 var PREF_KEY = 'lottieTools_exporter' // old key kept so saved settings carry over
 

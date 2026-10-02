@@ -74,6 +74,24 @@ export const FEATURES = [
 		note: 'Only full lottie-web runs expressions; ThorVG covers about 75%.',
 	},
 	{
+		id: 'motionPathDip',
+		label: 'Motion path easing back past its start',
+		on: 'file',
+		detect: (j) => {
+			let hit = false
+			const walk = (v) => {
+				if (hit || !v || typeof v !== 'object') return
+				if (Array.isArray(v)) return v.forEach(walk)
+				if (Array.isArray(v.to) && v.o && v.i && v.to.concat(v.ti || []).some((x) => x)) hit = [].concat(v.o.y, v.i.y).some((y) => y < 0)
+				for (const k in v) walk(v[k])
+			}
+			walk(j)
+			return hit
+		},
+		support: each(ALL_WEB, 'dropped'),
+		note: 'An ease handle below 0 on a motion-path key: lottie-web jumps the layer to the end of that move for those frames instead of easing back. Re-optimise, or keep handles at 0 or above.',
+	},
+	{
 		id: 'effects',
 		label: 'Layer effects',
 		on: 'layer',

@@ -11,6 +11,8 @@ function isImage(a) {
 }
 
 function findSource(a, dirs) {
+	// precomp exports record their own folder in u
+	if (/^([a-zA-Z]:)?\//.test(a.u || '') && api.filePathExists(a.u + a.p)) return a.u + a.p
 	for (var i = 0; i < dirs.length; i++) {
 		var f = dirs[i] + '/' + (a.u || '') + a.p
 		if (api.filePathExists(f)) return f
@@ -33,6 +35,12 @@ function toJpeg(src, scratchDir) {
 // -> { embedded, copied, jpeg, missing }
 export function packImages(json, dirs, outDir, opts) {
 	var res = { embedded: 0, copied: 0, jpeg: 0, missing: 0 }
+	var names = {} // file name -> source, so two different images can't share one
+	var unique = function (name, src, id) {
+		if (names[name] && names[name] !== src) name = id + '_' + name
+		names[name] = src
+		return name
+	}
 	;(json.assets || []).forEach(function (a) {
 		if (!isImage(a)) return
 		var src = findSource(a, dirs)
@@ -45,10 +53,10 @@ export function packImages(json, dirs, outDir, opts) {
 		if (jpeg) res.jpeg++
 		if (opts.lottie) {
 			// dotLottie 2: u "/i/", e 0, and a size (ThorVG reads sizeless assets as audio)
-			var entry = 'i/' + api.getFileNameFromPath(file, true)
+			var entry = 'i/' + unique(api.getFileNameFromPath(file, true), src, a.id)
 			if (!opts.lottie.some(function (f) { return f.name === entry })) opts.lottie.push({ name: entry, data: fromBase64(api.encodeBinary(file)), store: true })
 			a.u = '/i/'
-			a.p = api.getFileNameFromPath(file, true)
+			a.p = entry.slice(2)
 			a.e = 0
 			res.copied++
 		} else if (opts.embed) {
@@ -58,7 +66,7 @@ export function packImages(json, dirs, outDir, opts) {
 			a.e = 1
 			res.embedded++
 		} else {
-			var name = api.getFileNameFromPath(file, true)
+			var name = unique(api.getFileNameFromPath(file, true), src, a.id)
 			var target = outDir + '/images/' + name
 			if (target !== file) {
 				if (api.filePathExists(target)) api.deleteFilePath(target)

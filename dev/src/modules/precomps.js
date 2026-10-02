@@ -15,6 +15,8 @@ import { exportComp, compLayers } from './cavalryExport.js'
 
 const isAnimated = (p) => p && Array.isArray(p.k) && p.k.length && typeof p.k[0] === 'object' && 't' in p.k[0]
 
+const isImageAsset = (a) => a && !a.layers && typeof a.p === 'string' && a.p.indexOf('data:') !== 0
+
 // mn is the scene id with the layer's ind appended for inlined references
 // (compositionReference#88 + 2 -> "compositionReference#882"); match the longest prefix.
 function sceneId(mn, ids) {
@@ -341,14 +343,20 @@ function combine2(X, Y) {
 const asNum = (P) => (Array.isArray(P.k) ? P.k[0] : P.k)
 
 // The writer drops opacity on groups (static 100 or its animation): take it from the scene.
-function sceneOpacity(L, id) {
+// Driven opacity is sampled every frame of `range` ([comp, from, to]).
+function sceneOpacity(L, id, range) {
 	if (!L.ks) return false
 	const animated = (api.getAnimatedAttributes(id) || []).indexOf('opacity') >= 0
 	if (animated) {
 		L.ks.o = sceneKeys(id, 'opacity', (v) => v)
 		return true
 	}
-	if ((api.getInConnectedAttributes(id) || []).indexOf('opacity') >= 0) return false // ponytail: driven opacity isn't sampled yet
+	if (drivenAttr(id, 'opacity')) {
+		if (!range) return false
+		const o = frameKeys(sampleAttr(range[0], id, 'opacity', range[1], range[2]), range[1], (v) => [v])
+		L.ks.o = o.a ? o : { a: 0, k: o.k[0] }
+		return true
+	}
 	let v
 	try {
 		v = api.get(id, 'opacity')
@@ -431,7 +439,7 @@ export function layerMatrix(ks, t) {
 // lottie-web clips a matted layer to its path bounds (strokes excluded) plus 10%, so a
 // straight stroked line (zero height) vanishes under any matte, and strokes near the bounds
 // are cut. An invisible rect over the stroked bounds keeps them in.
-// ponytail: group transforms are read at frame 0; bake per key if animated groups turn up.
+// Animated group transforms count at each of their keys (and halfway between, for turns).
 export function padMatteBounds(L) {
 	let b = null, sw = 0
 	const grow = (M, x, y) => {
@@ -439,11 +447,11 @@ export function padMatteBounds(L) {
 		b = b ? [Math.min(b[0], q[0]), Math.min(b[1], q[1]), Math.max(b[2], q[0]), Math.max(b[3], q[1])] : [q[0], q[1], q[0], q[1]]
 	}
 	const values = (p) => (!p ? [] : isAnimated(p) ? p.k.map((k) => k.s).filter((v) => v !== undefined) : [p.k])
-	const walk = (items, M) => {
+	const walk = (items, M, t) => {
 		const tr = items.find((x) => x.ty === 'tr')
-		if (tr) M = mul(M, layerMatrix(tr, 0))
+		if (tr) M = mul(M, layerMatrix(tr, t))
 		for (const it of items) {
-			if (it.ty === 'gr') walk(it.it || [], M)
+			if (it.ty === 'gr') walk(it.it || [], M, t)
 			else if (it.ty === 'sh') {
 				for (const v of values(it.ks))
 					for (const sh of Array.isArray(v) ? v : [v]) if (sh && sh.v) sh.v.forEach((q, i) => (grow(M, q[0], q[1]), grow(M, q[0] + sh.i[i][0], q[1] + sh.i[i][1]), grow(M, q[0] + sh.o[i][0], q[1] + sh.o[i][1])))
@@ -451,9 +459,26 @@ export function padMatteBounds(L) {
 			else if (it.ty === 'st' || it.ty === 'gs') sw = Math.max(sw, ...values(it.w).map((w) => (Array.isArray(w) ? w[0] : w) * Math.sqrt(Math.abs(M[0] * M[3] - M[1] * M[2]))))
 		}
 	}
-	walk(L.shapes || [], [1, 0, 0, 1, 0, 0])
-	// the 10% margin covers a stroke's half width once each side is 5 widths long
-	if (!b || !sw || Math.min(b[2] - b[0], b[3] - b[1]) >= 5 * sw) return false
+	const keyTimes = new Set([0])
+	const collect = (items) => {
+		for (const it of items || []) {
+			if (it.ty === 'gr') collect(it.it)
+			if (it.ty !== 'tr') continue
+			for (const f of ['p', 'a', 's', 'r', 'sk']) if (isAnimated(it[f])) it[f].k.forEach((kf, j, k) => (keyTimes.add(kf.t), k[j + 1] && keyTimes.add((kf.t + k[j + 1].t) / 2)))
+		}
+	}
+	collect(L.shapes)
+	// lottie-web measures each frame: pad if any is thin, over all of them
+	let all = null, thin = false
+	for (const t of keyTimes) {
+		b = null
+		walk(L.shapes || [], [1, 0, 0, 1, 0, 0], t)
+		if (!b) continue
+		thin = thin || Math.min(b[2] - b[0], b[3] - b[1]) < 5 * sw // the 10% margin covers a stroke's half width once each side is 5 widths long
+		all = all ? [Math.min(all[0], b[0]), Math.min(all[1], b[1]), Math.max(all[2], b[2]), Math.max(all[3], b[3])] : b
+	}
+	b = all
+	if (!b || !sw || !thin) return false
 	const still = (k) => ({ a: 0, k })
 	L.shapes.push({
 		ty: 'gr',
@@ -626,6 +651,29 @@ function samplePivots(comp, ids, frames, maskIds) {
 	return out
 }
 
+// A driven (connected) attribute's value at every frame of [from, to]: Cavalry only
+// evaluates it at the current frame. Opens the comp; the caller restores comp and frame.
+function sampleAttr(comp, id, attr, from, to) {
+	api.setActiveComp(comp)
+	const out = []
+	for (let f = from; f <= to; f++) {
+		api.setFrame(f)
+		out.push(api.get(id, attr))
+	}
+	return out
+}
+
+// Per-frame values as a Lottie property (linear between frames; holdJumps snaps jumps).
+function frameKeys(vals, from, map) {
+	const k = vals.map((v, j) => {
+		const kf = { t: from + j, s: map(v) }
+		if (j < vals.length - 1) Object.assign(kf, { o: { x: [0], y: [0] }, i: { x: [1], y: [1] } })
+		return kf
+	})
+	return k.every((kf) => JSON.stringify(kf.s) === JSON.stringify(k[0].s)) ? { a: 0, k: k[0].s } : { a: 1, k }
+}
+const drivenAttr = (id, attr) => (api.getInConnectedAttributes(id) || []).some((a) => a === attr || a.indexOf(attr + '.') === 0)
+
 // Clipping masks on a scene layer: [{id, mode}] (enabled ones only).
 function sceneMasks(id) {
 	return api
@@ -650,6 +698,7 @@ function sceneMasks(id) {
 const MATTE_TT = { 0: 1, 1: 2, 2: 3, 3: 4, 4: 1, 5: 2 } // Cavalry matteMode -> Lottie tt
 
 function matteConns(id) {
+	if (!api.hasAttribute(id, 'matteMode')) return [] // filters, behaviours: Cavalry logs an error for missing attributes
 	let mode = 0
 	try {
 		mode = api.get(id, 'matteMode')
@@ -715,8 +764,7 @@ function sceneFills(id) {
 
 // fillColor as Lottie [r, g, b, 1] (0..1) and its alpha as 0..1; animated when keyed.
 // Channels keyed at the same frames with the same eases keep the scene's keys; otherwise
-// one key per frame over [from, to].
-// ponytail: a driven (connected) fillColor is read at the current frame only.
+// one key per frame over [from, to]. A driven fillColor arrives already sampled per frame.
 export function fillProps(channels, from, to) {
 	const at = (t) => channels.map((P) => (valueAt(P, t) || [0])[0])
 	const anim = channels.filter(isAnimated)
@@ -869,6 +917,16 @@ export function exportWithPrecomps(compId, opts = {}) {
 		}
 		dirs.push(out.dir)
 		const exported = out.json
+		// every comp exports to its own folder, and images in two of them can share an id or
+		// a name: point each at its folder and give it an id of its own, before layers are copied
+		const tag = next++
+		for (const a of exported.assets || []) {
+			if (!isImageAsset(a)) continue
+			const id = a.id + '_' + tag
+			for (const L of exported.layers) if (L.ty === 2 && L.refId === a.id) L.refId = id
+			a.id = id
+			a.u = out.dir + '/' + (a.u || '')
+		}
 		const ids = new Set(compLayers(comp))
 		const fps = exported.fr
 		const sceneOf = new Map()
@@ -885,7 +943,6 @@ export function exportWithPrecomps(compId, opts = {}) {
 				cache[inner] = assetId // set before recursing, so a cycle ends here
 				const built = build(inner)
 				assets.push({ id: assetId, nm: api.getNiceName(inner), fr: built.fr, layers: built.layers })
-				// ponytail: image assets from different comps that share an id or file name clash; prefix them per comp if that turns up
 				for (const a of built.assets || []) if (!assets.some((b) => b.id === a.id)) assets.push(a)
 			}
 			const [w, h] = compSize(inner)
@@ -931,7 +988,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 			sceneTransformKeys(L, id)
 			sceneRotationScale(L, id)
 			sceneSkew(L, id, (w) => warnings.push(w))
-			if (L.ty !== 0) sceneOpacity(L, id)
+			if (L.ty !== 0) sceneOpacity(L, id, [comp, api.get(comp, 'startFrame'), last])
 			sceneEases(L, id)
 			sceneHolds(L, id)
 		}
@@ -1008,7 +1065,10 @@ export function exportWithPrecomps(compId, opts = {}) {
 			for (const f of sceneFills(id)) {
 				const anim = api.getAnimatedAttributes(f) || []
 				const still = api.get(f, 'fillColor')
-				const channels = ['r', 'g', 'b', 'a'].map((c) => (anim.indexOf('fillColor.' + c) >= 0 ? sceneKeys(f, 'fillColor.' + c, (v) => v / 255) : { a: 0, k: still[c] / 255 }))
+				const driven = drivenAttr(f, 'fillColor') && sampleAttr(comp, f, 'fillColor', from, to)
+				const channels = ['r', 'g', 'b', 'a'].map((c) =>
+					driven ? frameKeys(driven, from, (v) => [v[c] / 255]) : anim.indexOf('fillColor.' + c) >= 0 ? sceneKeys(f, 'fillColor.' + c, (v) => v / 255) : { a: 0, k: still[c] / 255 },
+				)
 				const { color, opacity } = fillProps(channels, from, to)
 				if (api.get(f, 'blendMode') !== 3) warnings.push('The Fill filter on ' + api.getNiceName(id) + ' uses a blend mode Lottie’s Fill effect lacks; it exports as Normal')
 				for (const D of drawingUnder(exported.layers, L)) {

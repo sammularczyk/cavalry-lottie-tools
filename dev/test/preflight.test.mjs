@@ -60,3 +60,10 @@ test('matte gap, expressions and frame-by-frame layers', () => {
 test('describePlayers groups by level', () => {
 	assert.equal(describePlayers({ iosCA: 'fatal', android: 'dropped', iosMT: 'fatal' }), 'Fails: iOS · Core Animation, iOS · Main Thread · Dropped: Android')
 })
+
+test('flags motion-path keys whose ease dips below 0 (lottie-web jumps to the end)', () => {
+	const p = (y) => ({ a: 1, k: [{ t: 0, s: [0, 0], to: [10, 0], ti: [-10, 0], o: { x: 0.3, y }, i: { x: 0.7, y: 1 } }, { t: 10, s: [100, 0] }] })
+	const has = (y) => ids(checkLottie({ layers: [L({ ks: { p: p(y) } })] })).includes('motionPathDip')
+	assert.equal(has(-0.02), true)
+	assert.equal(has(0), false)
+})

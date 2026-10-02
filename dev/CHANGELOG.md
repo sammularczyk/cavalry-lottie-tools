@@ -1,6 +1,13 @@
 # Changelog
 
 ## Unreleased
+- Importer: animated shape-group transforms import (they froze at their first value). A path under one moving group keeps that group's keys and eases on its own transform, and stays editable; anything else is baked to the path on every frame. Animated group opacity is keyed on the shape.
+- Exporter: driven (connected) opacity and Fill filter colours are sampled every frame instead of read at the current one.
+- Exporter: images from different comps no longer clash when they share an id or file name (the wrong image showed in one of them).
+- Exporter: matte bounds padding (for straight stroked lines) follows animated groups instead of their first frame.
+- Exporter: no more "Attribute not found: matteMode" errors in the console for filters and behaviours.
+- Player check: flags motion-path keys whose ease dips below 0, which lottie-web jumps to the end of.
+- Both scripts check for updates from sammularczyk/cavalry-lottie-tools.
 - Optimiser: fitted motion paths never use an ease that dips below 0. lottie-web jumps a motion path to its segment's end whenever progress goes negative, so particles snapped across the screen (up to 24 px in the flourish).
 - Optimiser panel: "Experimental: refit eased keys" under Advanced (off in every preset) lets keyframe fitting replace keys that already have eases, checked every half frame. The 596-particle flourish went from 2.7 MB to 1.34 MB (0.48 px at most); optimising took 4 s instead of 0.6 s.
 - Optimiser: "Turn baked moving shapes back into transforms" also takes eased keys several frames apart when the shape only moves and scales (exact: that's how position and scale interpolate), shapes that grow from a single point, and leaves a turn too small to see as a still rotation. A 596-particle flourish went from 3.0 MB to 2.7 MB.
@@ -25,7 +32,7 @@
 - Optimiser: "Remove doubled fills and strokes" fixes Cavalry writing every path's paint twice (see-through colours rendered too strong); matches Cavalry exactly and saves a fifth of a typical file.
 - Optimiser: "Merge neighbouring shape layers" and "Share fills and strokes between shapes" restructure Cavalry's one-layer-per-shape output the way After Effects files are built; lossless.
 - Optimiser: baked keyframes are replaced with a few fitted, eased keys (checked every half frame); path morphs fit with one shared ease and curved motion becomes motion paths.
-- Optimiser: "Simplify still paths" removes points that don't change an outline, refitting curves either side.
+- Optimiser: "Simplify paths" removes points that don't change an outline, refitting curves either side.
 - Optimiser: baked squash and stretch is recovered as non-uniform scale, as well as move, turn and scale.
 - Optimiser: Accuracy (Exact / Balanced / Small file / Smallest) and Plays at (full / half / quarter size) set every tolerance in on-screen pixels, per layer from how big it's drawn.
 - Optimiser: images can be embedded in the JSON (on by default) and opaque PNGs saved as JPEG (macOS).
