@@ -1385,7 +1385,8 @@ function simplifyPathKeys(k, tol) {
 // Shape layers with identical content become one precomp used several times. Cavalry
 // writes every duplicate (and every comp reference) out in full; After Effects exports
 // share a precomp. The precomp is drawn offset by `pad` so content left or above the
-// origin isn't clipped by the precomp's bounds, and the anchor moves by the same amount.
+// origin isn't clipped by the precomp's bounds, and the anchor (and any masks) move by the
+// same amount. Each copy keeps its own transform, track matte, masks and effects.
 // ponytail: exact duplicates only; copies one frame apart (re-baked) aren't matched.
 export function instanceLayers(json, opts = {}) {
 	const minBytes = opts.minBytes != null ? opts.minBytes : 1000
@@ -1404,8 +1405,7 @@ export function instanceLayers(json, opts = {}) {
 		const parents = new Set(layers.map((L) => L.parent).filter((v) => v != null))
 		const groups = new Map()
 		layers.forEach((L, i) => {
-			if (L.ty !== 4 || L.tt || L.td || L.tp != null || L.ddd === 1 || L.ao === 1 || parents.has(L.ind)) return
-			if ((L.masksProperties && L.masksProperties.length) || (L.ef && L.ef.length)) return
+			if (L.ty !== 4 || L.td || L.tp != null || L.ddd === 1 || L.ao === 1 || parents.has(L.ind)) return
 			const key = JSON.stringify({ shapes: L.shapes, ip: L.ip, op: L.op, st: L.st, sr: L.sr })
 			if (key.length < minBytes || key.indexOf('"x":"') >= 0) return
 			if (!groups.has(key)) groups.set(key, [])
@@ -1433,13 +1433,21 @@ export function instanceLayers(json, opts = {}) {
 				const ks = Object.assign({}, L.ks)
 				ks.a = shiftAnchor(ks.a, pad)
 				const outer = { ty: 0, refId: id, w: 2 * pad, h: 2 * pad, ind: L.ind, ip: L.ip, op: L.op, st: 0, sr: 1, ks }
-				for (const f of ['nm', 'parent', 'bm', 'hd']) if (L[f] !== undefined) outer[f] = L[f]
+				for (const f of ['nm', 'parent', 'bm', 'hd', 'tt', 'ef', 'hasMask']) if (L[f] !== undefined) outer[f] = L[f]
+				if (L.masksProperties) outer.masksProperties = L.masksProperties.map((m) => (m.pt ? Object.assign({}, m, { pt: shiftMaskPath(m.pt, pad) }) : m))
 				layers[i] = outer
 			}
 			n += idx.length - 1
 		}
 	}
 	return n
+}
+
+// Mask paths move into the precomp layer's space, which sits pad up and left.
+function shiftMaskPath(pt, pad) {
+	const one = (sh) => (sh && sh.v ? Object.assign({}, sh, { v: sh.v.map((q) => [q[0] + pad, q[1] + pad]) }) : sh)
+	if (!isAnimated(pt)) return Object.assign({}, pt, { k: one(pt.k) })
+	return Object.assign({}, pt, { k: pt.k.map((kf) => Object.assign({}, kf, kf.s ? { s: kf.s.map(one) } : {}, kf.e ? { e: kf.e.map(one) } : {})) })
 }
 
 function shiftAnchor(a, pad) {

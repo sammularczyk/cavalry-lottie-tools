@@ -307,6 +307,20 @@ test('instanceLayers: identical shape layers share one precomp; anchor shifts by
 	assert.equal(inner.bm, undefined, 'blend stays on the outer layer')
 })
 
+test('instanceLayers: matted, masked copies share too; masks move with the anchor', () => {
+	const shapes = [{ ty: 'gr', it: [{ ty: 'rc', s: { a: 0, k: [10, 10] }, p: { a: 0, k: [0, 0] }, nm: 'x'.repeat(1200) }] }]
+	const mask = { mode: 'a', pt: { a: 0, k: { c: true, v: [[0, 0], [10, 0], [10, 10]], i: [[0, 0], [0, 0], [0, 0]], o: [[0, 0], [0, 0], [0, 0]] } }, o: { a: 0, k: 100 } }
+	const copy = (ind, sx) => layer({ ind, tt: 2, hasMask: true, masksProperties: [JSON.parse(JSON.stringify(mask))], ef: [{ ty: 21 }], shapes: JSON.parse(JSON.stringify(shapes)), ks: { s: { a: 0, k: [sx, 200, 100] } } })
+	const j = { w: 100, h: 100, layers: [layer({ ind: 9, td: 1 }), copy(1, 200), layer({ ind: 8, td: 1 }), copy(2, -200)] }
+	assert.equal(P.instanceLayers(j), 1)
+	const a = j.layers[1], b = j.layers[3]
+	assert.equal(a.ty, 0); assert.equal(a.refId, b.refId)
+	assert.equal(a.tt, 2); assert.equal(a.hasMask, true); assert.deepEqual(a.ef, [{ ty: 21 }])
+	assert.deepEqual(b.ks.s.k, [-200, 200, 100])
+	assert.deepEqual(a.masksProperties[0].pt.k.v, [[2000, 2000], [2010, 2000], [2010, 2010]])
+	assert.equal(j.layers[0].td, 1, 'matte layers stay where they are')
+})
+
 test('holdJumps holds the key before a one-frame jump, leaves smooth runs and spaced keys alone', () => {
 	const lin = { o: { x: [0], y: [0] }, i: { x: [1], y: [1] } }
 	// steady 1 px/frame, then a 100 px jump between frames 3 and 4, then steady again

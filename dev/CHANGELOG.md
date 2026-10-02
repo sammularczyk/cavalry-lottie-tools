@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Optimiser: "Share identical layers as one precomp" also shares copies that are track-matted, masked or carry effects; each copy keeps its own matte, masks, effects and transform (mirrored copies included). The CTV intro went from 278 KB to 253 KB, drawing the same in lottie-web.
 - Importer: animated shape-group transforms import (they froze at their first value). A path under one moving group keeps that group's keys and eases on its own transform, and stays editable; anything else is baked to the path on every frame. Animated group opacity is keyed on the shape.
 - Exporter: driven (connected) opacity and Fill filter colours are sampled every frame instead of read at the current one.
 - Exporter: images from different comps no longer clash when they share an id or file name (the wrong image showed in one of them).
