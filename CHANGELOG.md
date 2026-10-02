@@ -19,3 +19,8 @@
 - Exporter: keyframed transforms the writer baked per frame use the scene's keys and eases instead, when they reproduce the bake on every frame.
 - Optimiser: "Flatten nested shape groups" lifts sole, identity-transform groups into the level above.
 - Renamed Lottie Exporter Pro to Lottie Optimiser.
+- Importer: time remapping (Lottie `tm`) on precomp layers; precomps get their own frame range instead of Cavalry's default.
+- Importer: anchors and precomp/image centring offsets turn with the layer's rotation (rotated precomps landed in the wrong place).
+- Importer: a parent's opacity stays on its own content (Lottie children don't inherit it), and children below their parent in the Lottie stack draw below it.
+- Importer: children separated from their parent by other layers get a transform proxy, so the stack order matches Lottie (hair behind a head).
+- Importer: animated group positions no longer empty the path (NaN); the group's animation itself isn't imported yet.

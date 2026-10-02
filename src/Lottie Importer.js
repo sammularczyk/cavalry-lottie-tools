@@ -891,8 +891,10 @@ var _lottieMaskPropsUnsupportedLogged = false;
 // --- Extract full transform from a Lottie tr item ---
 function extractGroupTransform(trItem) {
     if (!trItem) return { px: 0, py: 0, ax: 0, ay: 0, r: 0, sx: 100, sy: 100, opacity: 100, sk: 0, sa: 0 };
-    var tp = trItem.p && trItem.p.k ? trItem.p.k : (trItem.p || [0, 0]);
-    var ta = trItem.a && trItem.a.k ? trItem.a.k : (trItem.a || [0, 0]);
+    // getStaticValue, not .k: an animated position's k is a keyframe list, which made every
+    // vertex NaN and the path empty. ponytail: group transform animation itself isn't imported yet.
+    var tp = trItem.p ? getStaticValue(trItem.p, [0, 0]) : [0, 0];
+    var ta = trItem.a ? getStaticValue(trItem.a, [0, 0]) : [0, 0];
     var rVal = 0;
     if (trItem.r) {
         rVal = getStaticValue(trItem.r, 0);
@@ -1416,8 +1418,11 @@ function getLayerTransform(ks, yFlip, hasParent, compW, compH, scale, bakeAnchor
 
     var lsx = (Array.isArray(s) ? s[0] : s) / 100;
     var lsy = (Array.isArray(s) ? s[1] : s) / 100;
-    var px = bakeA ? (p[0] - a[0] * lsx) : p[0];
-    var py = bakeA ? (p[1] - a[1] * lsy) : p[1];
+    // Baking the anchor: position - R*S*anchor (the anchor offset turns with the layer)
+    var rr = (r || 0) * Math.PI / 180;
+    var axs = a[0] * lsx, ays = a[1] * lsy;
+    var px = bakeA ? (p[0] - (Math.cos(rr) * axs - Math.sin(rr) * ays)) : p[0];
+    var py = bakeA ? (p[1] - (Math.sin(rr) * axs + Math.cos(rr) * ays)) : p[1];
 
     if (!hasParent) {
         px -= compW / 2;
@@ -1451,6 +1456,31 @@ function getLayerTransform(ks, yFlip, hasParent, compW, compH, scale, bakeAnchor
     };
 }
 
+// A parent layer that draws something gets its content split from its transform when
+// (a) it has its own opacity: Cavalry children inherit opacity from their parent, Lottie
+// children don't; or (b) its children sit below it in the Lottie stack: Cavalry draws
+// children over their parent, so the content has to be brought to the front.
+function opacitySplitNeeded(layer, entry, parentInds) {
+    if (!parentInds[layer.ind] || !layer.ks) return false;
+    if (entry.kind === "null" || entry.kind === "precomp") return false;
+    if (parentInds[layer.ind] === "below") return true;
+    if (!layer.ks.o) return false;
+    if (singleValuePropIsAnimated(layer.ks.o)) return true;
+    var o = getStaticValue(layer.ks.o, 100);
+    return (Array.isArray(o) ? o[0] : o) < 100;
+}
+
+// Precomps and images are drawn centred on their position in Cavalry, from the top-left in
+// Lottie: move by half the size, scaled and turned with the layer.
+function addCentreOffset(transform, w, h, scaleFactor, yFlip) {
+    var lsx = transform.scale[0] / 100, lsy = transform.scale[1] / 100;
+    var r = (yFlip ? -transform.rotation : transform.rotation) * Math.PI / 180; // back to Lottie's direction
+    var dx = (w / 2) * lsx, dy = (h / 2) * lsy;
+    var ox = Math.cos(r) * dx - Math.sin(r) * dy, oy = Math.sin(r) * dx + Math.cos(r) * dy;
+    transform.position[0] += scaleFactor * ox;
+    transform.position[1] += scaleFactor * (yFlip ? -oy : oy);
+}
+
 function createGroup(name) {
     return api.create("group", name);
 }
@@ -1471,7 +1501,9 @@ function getPivotAnchorForLayer(ks, precompW, precompH) {
 }
 
 // Outer = T(p)*R*S, inner = T(-anchor) so world matches lottie-web when R animates.
-function buildLayerTransformRig(contentNodeId, layer, entry) {
+// force: always split into transform + pivot groups (a parent whose opacity must stay on its
+// own content, since Lottie children don't inherit opacity and Cavalry children do).
+function buildLayerTransformRig(contentNodeId, layer, entry, force) {
     if (!contentNodeId || !layer) return { xform: contentNodeId, pivot: contentNodeId };
     // compositionReference layers: keep a single transform node with baked anchor.
     // The pivot rig + precomp centre bump are tuned together for shape layers; applying
@@ -1484,7 +1516,7 @@ function buildLayerTransformRig(contentNodeId, layer, entry) {
     var rigPW = (entry && entry.kind === "image" && entry.imageW > 0) ? entry.imageW : 0;
     var rigPH = (entry && entry.kind === "image" && entry.imageH > 0) ? entry.imageH : 0;
     var pa = getPivotAnchorForLayer(layer.ks, rigPW, rigPH);
-    if (!layer.ks || (Math.abs(pa.ax) < 0.0001 && Math.abs(pa.ay) < 0.0001)) {
+    if (!force && (!layer.ks || (Math.abs(pa.ax) < 0.0001 && Math.abs(pa.ay) < 0.0001))) {
         return { xform: contentNodeId, pivot: contentNodeId };
     }
     var nm = layer.nm || "Layer";
@@ -2792,6 +2824,33 @@ function writeEmbeddedImage(asset, b64Data, ext) {
     return null;
 }
 
+// Lottie time remap (seconds, keyed in the parent's time) -> Cavalry timeRemapping, which is a
+// % of the referenced comp's length (100% = its end frame). A static remap is one key: an
+// unkeyed 0 would mean "no remap".
+function applyTimeRemap(refId, tm, compId, fps, tOff) {
+    var start = api.get(compId, "startFrame"), end = api.get(compId, "endFrame");
+    var pct = function (sec) { return end > start ? ((sec * fps - start) / (end - start)) * 100 : 0; };
+    var off = tOff || 0;
+    try {
+        if (!(tm.a === 1 && Array.isArray(tm.k) && tm.k.length && typeof tm.k[0] === "object")) {
+            var v = Array.isArray(tm.k) ? tm.k[0] : tm.k;
+            api.keyframe(refId, off, { "timeRemapping": pct(v) });
+            return;
+        }
+        var cavKfs = [];
+        for (var i = 0; i < tm.k.length; i++) {
+            var k = tm.k[i];
+            var val = k.s !== undefined ? (Array.isArray(k.s) ? k.s[0] : k.s) : (tm.k[i - 1] && tm.k[i - 1].e ? tm.k[i - 1].e[0] : 0);
+            var fr = k.t + off, value = pct(val);
+            api.keyframe(refId, fr, { "timeRemapping": value });
+            cavKfs.push({ frame: fr, value: value });
+        }
+        applyLottieEasing(refId, "timeRemapping", cavKfs, tm.k, 0);
+    } catch (e) {
+        console.log("Lottie Importer: Time remap not applied: " + e.message);
+    }
+}
+
 // --- Create a Text Layer (ty=5) ---
 function createTextLayer(layer, name, yFlip, scaleFactor, compW, compH) {
     var textData = layer.t;
@@ -2972,7 +3031,6 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         for (var pKey in childrenByParent) {
             if (!childrenByParent.hasOwnProperty(pKey)) continue;
             var positions = childrenByParent[pKey];
-            if (positions.length <= 1) continue;
             var blocks = [[positions[0]]];
             for (var bi = 1; bi < positions.length; bi++) {
                 if (positions[bi] === positions[bi - 1] + 1) {
@@ -2992,19 +3050,31 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                     }
                 }
             }
-            if (blocks.length <= 1) continue;
-            proxyParentInds[pKey] = true;
-            var parentLayer = null;
+            var parentLayer = null, parentPos = -1;
             for (var fi = 0; fi < processLayers.length; fi++) {
                 if (processLayers[fi].layer.ind === parseInt(pKey, 10)) {
-                    parentLayer = processLayers[fi].layer; break;
+                    parentLayer = processLayers[fi].layer; parentPos = fi; break;
                 }
             }
+            // The first block also needs a proxy when other layers sit between it and the
+            // parent: nested under the parent it would be drawn next to the parent, not at its
+            // own place in the stack (back hair behind a head, front hair in front of it).
+            var firstDetached = false;
+            if (parentPos >= 0) {
+                var lo = Math.min(parentPos, blocks[0][0]) + 1, hi = Math.max(parentPos, blocks[0][blocks[0].length - 1]);
+                for (var gj = lo; gj < hi; gj++) {
+                    var gl = processLayers[gj];
+                    if (gj === parentPos || blocks[0].indexOf(gj) >= 0) continue;
+                    if (gl.layer.parent != parseInt(pKey, 10) && gl.kind !== "proxy" && gl.kind !== "null") { firstDetached = true; break; }
+                }
+            }
+            if (blocks.length <= 1 && !firstDetached) continue;
+            proxyParentInds[pKey] = true;
             for (var bk = 0; bk < blocks.length; bk++) {
                 for (var ci2 = 0; ci2 < blocks[bk].length; ci2++) {
                     childToProxyBlock[processLayers[blocks[bk][ci2]].layer.ind] = { parentInd: parseInt(pKey, 10), block: bk };
                 }
-                if (bk > 0) {
+                if (bk > 0 || firstDetached) {
                     proxyInserts.push({
                         insertBefore: blocks[bk][0],
                         parentInd: parseInt(pKey, 10),
@@ -3019,7 +3089,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
             var ins = proxyInserts[ii];
             var proxyEntry = {
                 index: -1,
-                layer: { ind: -(ins.parentInd * 100 + ins.block), nm: (ins.parentLayer ? ins.parentLayer.nm : "Null") + " [proxy]", parent: null },
+                layer: { ind: -(ins.parentInd * 100 + ins.block + 1), nm: (ins.parentLayer ? ins.parentLayer.nm : "Null") + " [proxy]", parent: null },
                 kind: "proxy",
                 proxyForInd: ins.parentInd,
                 proxyBlock: ins.block
@@ -3035,6 +3105,17 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
     })();
 
     var layerXformByInd = {};
+    var contentByInd = {}; // layers whose opacity sits on their content, not their transform
+    var parentInds = {};
+    var stackIndex = {};
+    for (var sii = 0; sii < layers.length; sii++) stackIndex[layers[sii].ind] = sii;
+    for (var pii = 0; pii < layers.length; pii++) {
+        var pp = layers[pii].parent;
+        if (pp == null) continue;
+        // a child later in the list is drawn below its parent in Lottie
+        if (stackIndex[pp] != null && pii > stackIndex[pp]) parentInds[pp] = "below";
+        else if (!parentInds[pp]) parentInds[pp] = true;
+    }
     var layerPivotByInd = {};
     var targetIdsByInd = {};
     var maskIndexByTarget = {};
@@ -3100,6 +3181,12 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                             "backgroundColor.a": 0
                         };
                         if (frameRate) compProps["fps"] = frameRate;
+                        // the precomp's own range from its layers (Cavalry's end frame is inclusive);
+                        // left at the default, content past it is cut off and time remap % is wrong
+                        var lastOp = 1;
+                        for (var li = 0; li < asset.layers.length; li++) if (asset.layers[li].op > lastOp) lastOp = asset.layers[li].op;
+                        compProps["startFrame"] = 0;
+                        compProps["endFrame"] = Math.max(1, Math.ceil(lastOp) - 1);
                         api.set(newCompId, compProps);
                     } catch (e) {}
                     importLayerSet(asset.layers, assets, yFlip, scaleFactor, assetW, assetH, null, 0, precompCache, frameRate);
@@ -3119,7 +3206,9 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                 continue;
             }
 
-            if (childSt !== 0) {
+            // With time remap, Lottie plays the precomp at tm (seconds) and ignores st.
+            if (layer.tm) applyTimeRemap(nodeId, layer.tm, precompCache[assetId], frameRate, tOff);
+            else if (childSt !== 0) {
                 try { api.offsetLayerTime(nodeId, childSt); } catch (e) {}
             }
             applyMasks(layer, [nodeId], yFlip, scaleFactor, nodeId, tOff, maskIndexByTarget, { w: assetW, h: assetH }, { w: compW, h: compH });
@@ -3285,7 +3374,9 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
             }
             rigEntry = { kind: "null" };
         }
-        var rigN = buildLayerTransformRig(nodeId, rigLayer, rigEntry);
+        var splitOpacity = entry.kind !== "proxy" && opacitySplitNeeded(layer, entry, parentInds);
+        var rigN = buildLayerTransformRig(nodeId, rigLayer, rigEntry, splitOpacity);
+        if (splitOpacity && rigN.xform !== nodeId) contentByInd[layer.ind] = nodeId;
         layerXformByInd[layer.ind] = rigN.xform;
         layerPivotByInd[layer.ind] = rigN.pivot;
         try {
@@ -3369,7 +3460,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                 uTarget = matteProxyByInd[uLayer.parent];
             } else {
                 var uBlock = childToProxyBlock[uLayer.ind];
-                if (uBlock && uBlock.block > 0 && uBlock.proxyInd != null) {
+                if (uBlock && uBlock.proxyInd != null) {
                     var uProxyPivot = layerPivotByInd[uBlock.proxyInd];
                     if (uProxyPivot != null) uTarget = uProxyPivot;
                 }
@@ -3500,6 +3591,19 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         }
     }
 
+    // Parents whose children sit below them in Lottie: their content goes over the children.
+    // ponytail: assumes all of a parent's children are below it; mixed stacks keep children on top
+    for (var cbi in contentByInd) {
+        if (!contentByInd.hasOwnProperty(cbi) || parentInds[cbi] !== "below") continue;
+        // re-parenting puts it on top of its siblings (bringToFront needs a selection);
+        // transforms aren't set yet, so nothing moves
+        try {
+            var cNode = contentByInd[cbi], cParent = api.getParent(cNode);
+            api.unParent(cNode);
+            api.parent(cNode, cParent);
+        } catch (eBf) {}
+    }
+
     // Pass 3: Transforms
     for (var ti = 0; ti < createdLayers.length; ti++) {
         var entry = createdLayers[ti];
@@ -3563,21 +3667,13 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         // Outer transform is T(p)*R*S; anchor is on child pivot when usePivotRig.
         var precompDims = null;
         if (entry.kind === "precomp" && entry.precompW && entry.precompH) {
-            var lsx = transform.scale[0] / 100;
-            var lsy = transform.scale[1] / 100;
-            transform.position[0] += scaleFactor * (entry.precompW / 2 * lsx);
-            transform.position[1] -= scaleFactor * (entry.precompH / 2 * lsy);
+            addCentreOffset(transform, entry.precompW, entry.precompH, scaleFactor, yFlip);
             precompDims = { w: entry.precompW, h: entry.precompH };
         }
         // Image layers: Cavalry rectangle is centered like compositionReferences.
         // Lottie anchor is from image top-left; adjust by half image size.
         if (entry.kind === "image" && entry.imageW > 0 && entry.imageH > 0) {
-            if (!usePivotRig) {
-                var imgLsx = transform.scale[0] / 100;
-                var imgLsy = transform.scale[1] / 100;
-                transform.position[0] += scaleFactor * (entry.imageW / 2 * imgLsx);
-                transform.position[1] -= scaleFactor * (entry.imageH / 2 * imgLsy);
-            }
+            if (!usePivotRig) addCentreOffset(transform, entry.imageW, entry.imageH, scaleFactor, yFlip);
             precompDims = { w: entry.imageW, h: entry.imageH };
         }
 
@@ -3602,7 +3698,8 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
             "scale.x": transform.scale[0] / 100,
             "scale.y": transform.scale[1] / 100
         };
-        if (entry.kind !== "null" && transform.opacity != null && transform.opacity < 100) {
+        var ownContent = contentByInd[tLayer.ind];
+        if (entry.kind !== "null" && !ownContent && transform.opacity != null && transform.opacity < 100) {
             setProps["opacity"] = transform.opacity;
         }
         if (transform.skew && Math.abs(transform.skew) > 0.001) {
@@ -3616,7 +3713,13 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         }
         api.set(tXform, setProps);
         keyframeAnimatedTransforms(tXform, tLayer.ks, yFlip, hasParent, compW, compH, scaleFactor, tOff, precompDims, parentPCD, usePivotRig,
-            entry.kind === "null");
+            entry.kind === "null" || !!ownContent);
+        if (ownContent) {
+            try {
+                if (transform.opacity != null && transform.opacity < 100) api.set(ownContent, { "opacity": transform.opacity });
+                keyframeSingleValue(ownContent, "opacity", tLayer.ks.o, tOff);
+            } catch (eOp) {}
+        }
         applyAutoOrient(tXform, tLayer, yFlip, tOff);
     }
 
