@@ -772,7 +772,8 @@ export function planMattes(comp, warn) {
 	for (const id of compLayers(comp)) {
 		const ms = matteConns(id)
 		if (!ms.length) continue
-		// Cavalry draws a group's children unmatted (tested: hidden, visible, inverted, nested)
+		// Cavalry draws a group's children unmatted, though its docs list track mattes for groups
+		// (2.8.0, both group modes: hidden or visible source, inverted, nested). Revisit if fixed.
 		if (api.getLayerType(id) === 'group') {
 			if (warn) warn('The track matte on group ' + api.getNiceName(id) + ' does nothing in Cavalry, so it isn’t exported')
 			continue
