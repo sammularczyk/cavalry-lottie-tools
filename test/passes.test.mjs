@@ -470,3 +470,17 @@ test('mergeShapeGroups: same path twice takes both paints; matching paints share
 	const touching = { layers: [layer({ shapes: [g(0, fill()), g(5, fill())] })] }
 	assert.equal(P.mergeShapeGroups(touching), 0)
 })
+
+test('equalisePathPoints: keys get one point count; shapes unchanged; holds where the count changes', () => {
+	const shape = (pts) => ({ c: true, v: pts, i: pts.map(() => [0, 0]), o: pts.map((_, i) => [i, 0]) })
+	const tri = shape([[0, 0], [10, 0], [5, 8]]), quad = shape([[0, 0], [10, 0], [10, 10], [0, 10]])
+	const p = { a: 1, k: [kf(0, [tri], linKey), kf(1, [quad], linKey), kf(5, [quad])] }
+	assert.equal(P.equalisePathPoints({ layers: [layer({ shapes: [{ ty: 'sh', ks: p }] })] }), 1)
+	assert.deepEqual(p.k.map((k) => k.s[0].v.length), [4, 4, 4])
+	assert.equal(p.k[0].h, 1) // 3 -> 4 points: hold
+	assert.equal(p.k[1].h, undefined)
+	const t = p.k[0].s[0]
+	assert.deepEqual(t.v[3], [5, 8]) // padding sits on the last point
+	assert.deepEqual(t.o[2], [0, 0]) // ...with a zero-length step to it
+	assert.deepEqual(t.o[3], [2, 0]) // and the closing segment keeps the last point's handle
+})

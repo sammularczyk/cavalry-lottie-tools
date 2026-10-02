@@ -22,6 +22,8 @@ Found on 2026-10-02 by comparing exports against Cavalry's own renders, in lotti
 | 12 | Guide layers (`guideLayer` ≠ 0) and their children are exported. | Stray guide shapes appear. | Skip guide layers and their descendants. |
 | 13 | Static values written as animated with one key (`a:1`, one keyframe). | lottie-web stops drawing the layer entirely, and raw exports render blank. | Write `a:0` with the value. |
 | 14 | Skew isn't exported (documented limitation). | Skewed content renders unskewed. | Write `sk`/`sa`. |
+| 14b | Track mattes are dropped (documented limitation), and their hidden matte sources with them. | Matted layers export unclipped: a full-screen solid meant to show only through a frame covered a whole scene. | Geometry mattes (Stencil/Silhouette) are what Lottie masks do: write add/subtract masks from the matte's shapes. Luma/alpha mattes: write Lottie `tt`/`td` mattes. |
+| 14c | Baked paths whose point count changes from key to key (a procedural logo: 359, 427, then 30 points). | Players can't morph between them, and lottie-web corrupts its shared path buffers: other layers stopped drawing, and three scenes went blank. | Give every key of a path the same point count (pad with points on the last one), and hold where the shape changes topology. |
 
 ## File size
 

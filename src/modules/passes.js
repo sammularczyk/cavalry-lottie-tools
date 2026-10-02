@@ -890,6 +890,53 @@ function flatten(s) {
 // Smallest one-frame change that counts as a jump, per kind of value.
 const JUMP = { px: 2, scale: 2, angle: 2, opacity: 5, color: 0.05 }
 
+// Players can only morph between paths with the same number of points. Cavalry bakes
+// paths whose point count changes from frame to frame (text, booleans, procedural
+// shapes), and lottie-web then corrupts its shared path buffers: other layers stop
+// drawing, sometimes whole scenes. Every key gets the same count, padding with points on
+// top of the last one (the shape doesn't change), and holds where the real count changes.
+function padShape(sh, n) {
+	if (!sh || !Array.isArray(sh.v) || sh.v.length >= n || !sh.v.length) return
+	const last = sh.v.length - 1, out = sh.o[last]
+	sh.o[last] = [0, 0]
+	while (sh.v.length < n) {
+		sh.v.push(sh.v[last].slice())
+		sh.i.push([0, 0])
+		sh.o.push([0, 0])
+	}
+	sh.o[sh.v.length - 1] = out // the closing segment leaves from the last copy, as before
+}
+
+export function equalisePathPoints(json) {
+	let n = 0
+	const fix = (p) => {
+		if (!isAnimated(p)) return
+		const k = p.k.filter((kf) => Array.isArray(kf.s) && isObj(kf.s[0]))
+		if (k.length < 2) return
+		const shapes = Math.max(...k.map((kf) => kf.s.length))
+		if (k.some((kf) => kf.s.length !== shapes)) return // a path gaining whole outlines: leave it
+		const counts = (kf) => kf.s.map((sh) => (sh.v || []).length).join(',')
+		if (k.every((kf) => counts(kf) === counts(k[0]))) return
+		for (let j = 0; j < p.k.length - 1; j++) {
+			const a = p.k[j], b = p.k[j + 1]
+			if (a.s && b.s && counts(a) !== counts(b) && a.h !== 1) {
+				a.h = 1
+				delete a.i
+				delete a.o
+			}
+		}
+		for (let c = 0; c < shapes; c++) {
+			const max = Math.max(...k.map((kf) => kf.s[c].v.length))
+			for (const kf of k) padShape(kf.s[c], max)
+		}
+		n++
+	}
+	forEachProp(json, (p, key, owner) => {
+		if (key === 'ks' || key === 'pt') fix(p)
+	})
+	return n
+}
+
 // Cavalry and After Effects show whole frames; Lottie players draw in-between frames on
 // fast displays. A value that jumps from one frame to the next (a baked path wrapping
 // round, a layer snapping into place) then slides instead. Hold the key before each
@@ -1588,6 +1635,7 @@ export const PASSES = [
 	{ id: 'dedupeAssets', label: 'Merge identical assets', group: 'lossless', on: true, run: dedupeAssets },
 	{ id: 'trimToLayerRange', label: 'Trim keys outside each layer’s time range', group: 'lossless', on: true, run: trimToLayerRange },
 	{ id: 'recoverRigidMotion', label: 'Turn baked moving shapes back into transforms', group: 'lossy', on: true, run: recoverRigidMotion },
+	{ id: 'equalisePathPoints', label: 'Fix paths whose point count changes', group: 'lossless', on: true, run: equalisePathPoints },
 	{ id: 'holdJumps', label: 'Hold one-frame jumps', group: 'lossless', on: true, run: holdJumps, options: { all: false } },
 	{ id: 'simplifyKeys', label: 'Fit keyframes with curves', group: 'lossy', on: true, run: simplifyKeys },
 	{ id: 'simplifyPaths', label: 'Simplify still paths', group: 'lossy', on: true, run: simplifyPaths },

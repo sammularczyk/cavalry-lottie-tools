@@ -219,6 +219,8 @@ function exportSelected() {
 	var r = exportWithPrecomps(selectedComp(), opts)
 	var note = r.refs ? r.refs + ' comp reference(s) → ' + r.precomps + ' precomp(s)' : ''
 	if (r.pivots || r.baked) note += (note ? ' · ' : '') + (r.pivots + r.baked) + ' position(s) corrected'
+	if (r.masks) note += (note ? ' · ' : '') + r.masks + ' mask(s) and matte(s) rebuilt'
+	if (r.warnings && r.warnings.length) note += (note ? '\n' : '') + '⚠ ' + r.warnings.join('\n⚠ ')
 	return { json: r.json, dirs: r.dirs, note: note }
 }
 
@@ -324,6 +326,7 @@ var exportPage = page()
 
 // preset, then the two choices that depend on where the file is going
 var presetRow = new ui.HLayout()
+presetRow.setMargins(8, 2, 8, 0)
 presetRow.setSpaceBetween(6)
 presetRow.add(label('Preset', 12, T.text))
 presetRow.addStretch()
@@ -335,7 +338,10 @@ presetDrop.addEntry('Custom')
 presetRow.add(presetDrop)
 exportPage.add(presetRow)
 var presetDetail = label('', 10, T.muted)
-exportPage.add(presetDetail)
+var presetDetailRow = new ui.HLayout()
+presetDetailRow.setMargins(8, 0, 8, 4)
+presetDetailRow.add(presetDetail)
+exportPage.add(presetDetailRow)
 exportPage.add(choiceRow('format', 'Save as', FORMATS, 'Lottie JSON plays everywhere. dotLottie is the same animation zipped with its images: usually a fifth of the size, for LottieFiles players, the dotLottie runtimes, and lottie-android / lottie-ios. Not lottie-web on its own.'))
 exportPage.add(choiceRow('display', 'Plays at', DISPLAY, 'The size the animation is shown at, compared to the comp. Smaller means less detail is needed, so files get smaller. Pick the largest size it’s ever shown at.'))
 
@@ -384,7 +390,8 @@ function buildAdvanced() {
 
 function showAdvanced() {
 	advHead.title.setText((settings.advancedOpen ? '▾  ' : '▸  ') + 'Advanced')
-	adv.widget.setHidden(!settings.advancedOpen)
+	// ScrollView has no setHidden, and inside a Container it stops rendering: collapse it instead
+	adv.widget.setFixedHeight(settings.advancedOpen ? 250 : 0)
 }
 advHead.widget.onMousePress = function () {
 	settings.advancedOpen = !settings.advancedOpen
@@ -415,6 +422,7 @@ exportRow.add(button('Optimise file…', false, function () {
 	guarded(runOptimiseFile)
 }, T).widget)
 exportPage.add(exportRow)
+exportPage.addStretch() // pack rows at the top; the PageView is as tall as its tallest page
 
 // ---------- report page ----------
 
@@ -425,6 +433,7 @@ var reportList = list(380, T)
 reportList.layout.add(label('Export or optimise a file to see what each step saved.', 11, T.muted))
 reportList.layout.addStretch()
 reportPage.add(reportList.widget)
+reportPage.addStretch()
 
 var PASS_LABEL = {}
 PASSES.forEach(function (p) {

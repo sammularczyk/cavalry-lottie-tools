@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- Exporter: geometry track mattes (Stencil / Silhouette) become Lottie add / subtract masks from the matte's shapes, sampled from the scene; luma/alpha mattes are reported.
+- Optimiser: paths whose point count changes between keys are padded to one count and held where it changes; lottie-web otherwise corrupts its path buffers and blanks other layers.
 - Optimiser: keys and layers never on screen go: each comp's visible frames are worked out through precomp time offsets, stretch and time remapping (nested too), and parents keep keys while any child is visible.
 - Optimiser panel: Safe / Smaller / Extreme presets; Save as and Plays at up front; the rest under a collapsible Advanced section with Deselect all. Lossless steps are always on and hidden.
 - Optimiser panel: Report tab with what each step saved.

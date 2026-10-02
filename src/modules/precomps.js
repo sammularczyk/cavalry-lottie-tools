@@ -551,6 +551,46 @@ function sceneMasks(id) {
 		.filter(Boolean)
 }
 
+// Track mattes Cavalry's writer drops. Geometry mattes clip to the matte's shapes, which
+// is what a mask does: Stencil -> add (mode 0), Silhouette -> subtract (mode 1). Luma and
+// alpha mattes depend on pixels, so they're only counted (out.pixel).
+// ponytail: a layer with both masks and mattes gets their union, not their intersection.
+function sceneMattes(id, out) {
+	const conns = api.getInConnectedAttributes(id).filter((a) => /^trackMattes\.\d+\.id$/.test(a))
+	if (!conns.length) return []
+	let mode = 0
+	try {
+		mode = api.get(id, 'matteMode')
+	} catch (e) {}
+	if (mode !== 0 && mode !== 1) {
+		out.pixel += conns.length
+		return []
+	}
+	return conns
+		.map((a) => {
+			let on = true
+			try {
+				on = api.get(id, 'trackMattes.' + a.split('.')[1] + '.enabled') !== false
+			} catch (e) {}
+			return on && { id: String(api.getInConnection(id, a)).replace(/\.id$/, ''), mode }
+		})
+		.filter(Boolean)
+}
+
+// The shapes a mask or matte source draws: itself unless it's a group, plus its
+// descendants (hidden ones skipped; the source itself is usually hidden).
+function sourceShapes(id) {
+	const out = api.getLayerType(id) === 'group' ? [] : [id]
+	for (const k of api.getChildren(id)) {
+		let hidden = false
+		try {
+			hidden = !!api.get(k, 'hidden')
+		} catch (e) {}
+		if (!hidden) out.push(...sourceShapes(k))
+	}
+	return out
+}
+
 // Cavalry writes some static values as an animated property with one key, which stops
 // lottie-web drawing the layer at all; store those as static.
 export function staticSingleKeys(node) {
@@ -724,11 +764,28 @@ export function exportWithPrecomps(compId, opts = {}) {
 			baked += res.varying.length
 		}
 		// after positions are final: masks the writer dropped, sample their shapes every frame, rebuild on the drawing layers
-		const masked = exported.layers.filter((L) => sceneOf.get(L) && !L.masksProperties).map((L) => [L, sceneMasks(sceneOf.get(L))]).filter((x) => x[1].length)
+		const mattes = { pixel: 0 }
+		const masked = exported.layers
+			.filter((L) => sceneOf.get(L) && !L.masksProperties)
+			.map((L) => [L, sceneMasks(sceneOf.get(L)).concat(sceneMattes(sceneOf.get(L), mattes))])
+			.filter((x) => x[1].length)
+		if (mattes.pixel) warnings.push(mattes.pixel + ' luma/alpha track matte(s) in ' + api.getNiceName(comp) + ' can’t be exported; those layers show unmatted')
 		if (masked.length) {
 			const every = []
 			for (let f = start; f <= end; f++) every.push(f)
-			const paths = samplePivots(comp, [], every, [].concat(...masked.map((x) => x[1].map((m) => m.id))))
+			const shapesOf = new Map()
+			for (const [, ms] of masked) for (const m of ms) if (!shapesOf.has(m.id)) shapesOf.set(m.id, sourceShapes(m.id))
+			const sampled = samplePivots(comp, [], every, [...new Set([].concat(...shapesOf.values()))])
+			// a source's contours at each frame: all its shapes' contours together
+			const paths = {}
+			for (const [src, shapes] of shapesOf) {
+				const byFrame = {}
+				for (const f of every) {
+					const cs = [].concat(...shapes.map((sh) => (sampled[sh] && sampled[sh][f]) || []))
+					if (cs.length) byFrame[f] = cs
+				}
+				paths[src] = byFrame
+			}
 			const kids = (L) => exported.layers.filter((q) => q.parent === L.ind)
 			const drawing = (L) => L.ty !== 4 ? L.ty !== 3 : /"ty":"(sh|rc|el|sr)"/.test(JSON.stringify(L.shapes || []))
 			const under = (L) => [L].concat(...kids(L).map(under))
