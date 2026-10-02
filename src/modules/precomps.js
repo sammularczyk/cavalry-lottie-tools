@@ -551,11 +551,11 @@ function sceneMasks(id) {
 		.filter(Boolean)
 }
 
-// Track mattes Cavalry's writer drops. A geometry matte (Stencil / Silhouette) whose
-// source is only filled shapes clips to those shapes, which is what a mask does: Stencil
-// -> add (mode 0), Silhouette -> subtract (mode 1). Every other matte (strokes, luma,
-// alpha) becomes a Lottie track matte instead (planMattes / buildTrackMattes).
-// ponytail: a layer with both masks and mattes gets their union, not their intersection.
+// Track mattes Cavalry's writer drops become Lottie track mattes (planMattes /
+// buildTrackMattes). Not masks: a mask lives in the clipped layer's space, so under an
+// animated parent it has to be resampled every frame, and players blending the two
+// between frames let the layer show past the matte. A matte layer sits in comp space,
+// like Cavalry's matte.
 const MATTE_TT = { 0: 1, 1: 2, 2: 3, 3: 4, 4: 1, 5: 2 } // Cavalry matteMode -> Lottie tt
 
 function matteConns(id) {
@@ -576,24 +576,12 @@ function matteConns(id) {
 		.filter(Boolean)
 }
 
-// A matte source a mask can stand in for: drawn only by filled shapes, no strokes.
-function fillOnly(src) {
-	const drawn = sourceShapes(src).filter((sh) => api.hasAttribute(sh, 'material.alpha') || api.hasAttribute(sh, 'stroke.width'))
-	return drawn.length > 0 && drawn.every((sh) => api.hasAttribute(sh, 'material.alpha') && !api.hasAttribute(sh, 'stroke.width'))
-}
-
-const asMask = (m) => (m.mode === 0 || m.mode === 1) && fillOnly(m.id)
-
-function sceneMattes(id) {
-	return matteConns(id).filter(asMask)
-}
-
-// Mattes in a comp that need a real track matte: [{target, sources, tt}], plus the hidden
+// Track mattes in a comp: [{target, sources, tt}], plus the hidden
 // sources (and hidden ancestors) to show while Cavalry's writer exports them.
 function planMattes(comp) {
 	const jobs = [], unhide = new Set()
 	for (const id of compLayers(comp)) {
-		const ms = matteConns(id).filter((m) => !asMask(m))
+		const ms = matteConns(id)
 		if (!ms.length) continue
 		jobs.push({ target: id, sources: ms.map((m) => m.id), tt: MATTE_TT[ms[0].mode] || 1 })
 		for (const m of ms)
@@ -879,7 +867,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 		// after positions are final: masks the writer dropped, sample their shapes every frame, rebuild on the drawing layers
 		const masked = exported.layers
 			.filter((L) => sceneOf.get(L) && !L.masksProperties)
-			.map((L) => [L, sceneMasks(sceneOf.get(L)).concat(sceneMattes(sceneOf.get(L)))])
+			.map((L) => [L, sceneMasks(sceneOf.get(L))])
 			.filter((x) => x[1].length)
 		if (masked.length) {
 			const every = []

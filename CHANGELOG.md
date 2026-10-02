@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Exporter: every track matte exports as a real Lottie track matte (masks under an animated parent drifted between frames, so a bar stretched past its matte on fast screens).
 - Exporter: track mattes that a mask can't stand in for (stroked sources, luma, alpha) export as real Lottie track mattes: the source (shown briefly for the export if hidden) becomes a matte precomp above each layer it clips.
 - Exporter: a group's in/out frames now limit its children, as in Cavalry (Lottie parenting doesn't).
 - Exporter: geometry track mattes (Stencil / Silhouette) become Lottie add / subtract masks from the matte's shapes, sampled from the scene; luma/alpha mattes are reported.
