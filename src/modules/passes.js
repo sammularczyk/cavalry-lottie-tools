@@ -7,6 +7,8 @@
 
 // ---------- walking ----------
 
+import { fitEase, fitMotionPath, easeAt, LINEAR, simplifyPath } from './fit.js'
+
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 
 // An animatable property is {a, k}; animated when a === 1 and k is a list of keyframes.
@@ -557,6 +559,7 @@ export function stripMeta(json, opts = {}) {
 // tolerance and the decimals.
 function category(key, owner) {
 	const ty = owner && owner.ty
+	if (key === 'tm' && typeof ty === 'number') return 'time' // a layer's time remap, in seconds
 	switch (key) {
 		case 'c':
 		case 'g':
@@ -569,7 +572,7 @@ function category(key, owner) {
 		case 'sa':
 			return 'angle'
 		case 's':
-			if (ty === 'rc' || ty === 'el') return 'px'
+			if (ty === 'rc' || ty === 'el' || ty === 'gf' || ty === 'gs') return 'px' // sizes, gradient start
 			if (ty === 'tm') return 'opacity'
 			return 'scale'
 		case 'e':
@@ -579,8 +582,177 @@ function category(key, owner) {
 	}
 }
 
-export const TOLERANCE = { px: 0.25, scale: 0.25, angle: 0.1, opacity: 0.5, color: 0.004 }
-export const DECIMALS = { px: 2, scale: 2, angle: 2, opacity: 1, color: 3, tangent: 3 }
+// ---------- accuracy on screen ----------
+// Lossy passes work to `accuracy`: the most any point may move, in output pixels (comp
+// pixels × `display`, the size the animation plays at). Each layer's own units come from
+// how big it is drawn: its scale and its parents' and precomps' (the largest over time),
+// and for angles and scales its size. The error budget is shared so the passes' errors
+// can't add up past accuracy: moving shapes 25%, keyframe and path fitting 70%, rounding 5% (rounding saves little, and edges show it first).
+export const BUDGET = { rigid: 0.25, fit: 0.7, round: 0.05 }
+
+function maxScale(p) {
+	if (!p) return 1
+	const vals = isAnimated(p) ? p.k.map((k) => k.s).filter((v) => v !== undefined) : [p.k]
+	let m = 0
+	for (const v of vals) {
+		const a = asArray(v)
+		m = Math.max(m, Math.abs(a[0] != null ? a[0] : 100), Math.abs(a[1] != null ? a[1] : a[0] != null ? a[0] : 100))
+	}
+	return Math.max(m / 100, 1e-3)
+}
+
+const first = (p) => (!p ? null : isAnimated(p) ? p.k[0].s : p.k)
+
+// How far a layer's content reaches from its anchor, in the layer's own pixels.
+function layerRadius(L, json, assets) {
+	const a = asArray(first(L.ks && L.ks.a))
+	const ax = a[0] || 0, ay = a[1] || 0
+	let r = 0
+	const box = (w, h) => [[0, 0], [w, 0], [0, h], [w, h]].forEach((c) => (r = Math.max(r, Math.hypot(c[0] - ax, c[1] - ay))))
+	if (L.ty === 4) {
+		// a group's anchor lands within `base` of the layer anchor; its content is scaled by k.
+		// Rotation is bounded, not applied, so this can only overestimate.
+		const walk = (items, base, k, gx, gy) => {
+			const at = (q) => (r = Math.max(r, base + k * Math.hypot(q[0] - gx, q[1] - gy)))
+			for (const it of items || []) {
+				if (!it) continue
+				if (it.ty === 'gr') {
+					const tr = (it.it || []).find((x) => x && x.ty === 'tr') || {}
+					const p = asArray(first(tr.p)), ga = asArray(first(tr.a))
+					walk(it.it, base + k * Math.hypot((p[0] || 0) - gx, (p[1] || 0) - gy), k * maxScale(tr.s), ga[0] || 0, ga[1] || 0)
+				} else if (it.ty === 'sh') {
+					for (const sh of asArray(first(it.ks))) if (sh && sh.v) sh.v.forEach(at)
+				} else if (it.ty === 'rc' || it.ty === 'el') {
+					const c = asArray(first(it.p)), sz = asArray(first(it.s))
+					at([(c[0] || 0) + (sz[0] || 0) / 2, (c[1] || 0) + (sz[1] || 0) / 2])
+					at([(c[0] || 0) - (sz[0] || 0) / 2, (c[1] || 0) - (sz[1] || 0) / 2])
+				} else if (it.ty === 'sr') {
+					const c = asArray(first(it.p))
+					r = Math.max(r, base + k * (Math.hypot((c[0] || 0) - gx, (c[1] || 0) - gy) + (asArray(first(it.or))[0] || 0)))
+				}
+			}
+		}
+		walk(L.shapes, 0, 1, ax, ay)
+	} else if (L.ty === 0 && L.w) box(L.w, L.h)
+	else if (L.ty === 1) box(L.sw || 0, L.sh || 0)
+	else if (L.ty === 2 && assets[L.refId]) box(assets[L.refId].w || 0, assets[L.refId].h || 0)
+	return r > EPS ? r : Math.hypot(json.w || 1000, json.h || 1000) / 2
+}
+
+// Map layer -> { scale, parent, radius }: world scale of the layer's content and of the
+// space its transform sits in, both × display.
+function layerContexts(json, display) {
+	const assets = {}
+	for (const a of json.assets || []) assets[a.id] = a
+	const assetScale = {}
+	const ctx = new Map()
+	const visit = (layers, outer) => {
+		const byInd = new Map(layers.map((L) => [L.ind, L]))
+		const memo = new Map()
+		const world = (L, depth) => {
+			if (memo.has(L)) return memo.get(L)
+			const par = L.parent != null && depth < 64 ? byInd.get(L.parent) : null
+			const w = (par ? world(par, depth + 1) : outer) * maxScale(L.ks && L.ks.s)
+			memo.set(L, w)
+			return w
+		}
+		// a parent's size includes its children's: turning or scaling it moves them too
+		const kids = new Map()
+		for (const L of layers) if (L.parent != null && byInd.has(L.parent)) kids.set(L.parent, (kids.get(L.parent) || []).concat([L]))
+		const reach = new Map()
+		const radius = (L, depth) => {
+			if (reach.has(L)) return reach.get(L)
+			let r = L.ty === 3 ? 0 : layerRadius(L, json, assets)
+			const a = asArray(first(L.ks && L.ks.a))
+			for (const c of depth < 64 ? kids.get(L.ind) || [] : []) {
+				const cp = c.ks && c.ks.p
+				const p = cp && cp.s ? [asArray(first(cp.x))[0], asArray(first(cp.y))[0]] : asArray(first(cp)) // split x/y position
+				r = Math.max(r, Math.hypot((p[0] || 0) - (a[0] || 0), (p[1] || 0) - (a[1] || 0)) + radius(c, depth + 1) * maxScale(c.ks && c.ks.s))
+			}
+			if (r < EPS) r = layerRadius(L, json, assets)
+			reach.set(L, r)
+			return r
+		}
+		for (const L of layers) {
+			const par = L.parent != null ? byInd.get(L.parent) : null
+			const scale = world(L, 0)
+			ctx.set(L, { scale: scale * display, parent: (par ? world(par, 1) : outer) * display, radius: radius(L, 0) })
+			if (L.ty === 0 && L.refId != null) assetScale[L.refId] = Math.max(assetScale[L.refId] || 0, scale)
+		}
+	}
+	// precomps can nest: repeat until every asset's scale (the largest use) settles
+	for (let pass = 0; pass < 8; pass++) {
+		const before = JSON.stringify(assetScale)
+		visit(json.layers || [], 1)
+		for (const a of json.assets || []) if (Array.isArray(a.layers)) visit(a.layers, assetScale[a.id] || 1)
+		if (JSON.stringify(assetScale) === before) break
+	}
+	return ctx
+}
+
+// Tolerance per kind of value, in the property's own units, for the space `base` scales.
+// opts.tolerance (per kind, in property units) overrides the screen-space value.
+function toleranceFor(opts, json, c, base, share) {
+	const acc = (opts.accuracy != null ? opts.accuracy : 0.25) * share
+	const fixed = opts.tolerance || {}
+	const deg = (rad) => (rad * 180) / Math.PI
+	return (kind) => {
+		if (fixed[kind] != null) return fixed[kind]
+		switch (kind) {
+			case 'px':
+				return acc / base
+			case 'angle':
+				return Math.min(5 * share, deg(acc / (c.radius * c.scale)))
+			case 'scale':
+				return Math.min(5 * share, (100 * acc) / (c.radius * base))
+			// flat colour and opacity don't shift edges, so rounding takes a bigger share
+			case 'opacity':
+				return 2 * acc * Math.max(1, 0.2 / share) // 0.5% at ¼ px for fitting
+			case 'color':
+				return 0.016 * acc * Math.max(1, 0.2 / share)
+			// how far a time error moves things depends on the precomp's motion, which isn't
+			// known here: round only, never fit (see simplifyKeys)
+			case 'time':
+				return 2e-5
+		}
+		return acc / base
+	}
+}
+
+// Every property, with a tolerance function for its layer and space and the group-scale
+// multiplier it sits under. fn(prop, key, owner, tol, layer)
+function forEachLayerProp(json, opts, share, fn) {
+	const ctx = layerContexts(json, opts.display || 1)
+	for (const layers of layerLists(json))
+		for (const L of layers) {
+			const c = ctx.get(L)
+			const own = toleranceFor(opts, json, c, c.parent, share)
+			const inner = (mult) => toleranceFor(opts, json, c, c.scale * mult, share)
+			// an anchor sits in the space its transform scales, unlike the rest of the transform
+			if (L.ks) forEachProp(L.ks, (p, key, owner) => fn(p, key, owner, key === 'a' ? inner(1) : own, L), 'ks', L)
+			for (const k in L) {
+				if (k === 'ks' || k === 'shapes') continue
+				forEachProp(L[k], (p, key, owner) => fn(p, key, owner, inner(1), L), k, L)
+			}
+			const walk = (items, mult) => {
+				if (!Array.isArray(items)) return
+				const tol = inner(mult)
+				for (const it of items) {
+					if (it && it.ty === 'gr') {
+						const tr = (it.it || []).find((x) => x && x.ty === 'tr')
+						const m = mult * maxScale(tr && tr.s)
+						if (tr) forEachProp(tr, (p, key, owner) => fn(p, key, owner, key === 'a' ? inner(m) : tol, L), 'tr', it.it)
+						walk((it.it || []).filter((x) => x !== tr), m)
+						for (const k in it) if (k !== 'it') forEachProp(it[k], (p, key, owner) => fn(p, key, owner, tol, L), k, it)
+					} else forEachProp(it, (p, key, owner) => fn(p, key, owner, tol, L), undefined, items)
+				}
+			}
+			walk(L.shapes, 1)
+		}
+}
+
+// Decimals whose rounding (at most half a unit of the last place) stays within tol.
+const decimalsFor = (tol) => Math.min(5, Math.max(0, Math.ceil(-Math.log10(2 * tol))))
 
 // A keyframe value as a flat list of numbers (shapes: every vertex and tangent).
 function flatten(s) {
@@ -635,47 +807,127 @@ export function holdJumps(json, opts = {}) {
 	return n
 }
 
-// RDP over time: drop keys whose value lies within tol of the straight line between the
-// keys kept either side. Only runs of linear segments are touched; eased, held and
-// spatial keys always stay.
+// Keyframe fitting: replaces runs of frame-by-frame (baked) or linear keys with as few
+// keys as possible, each segment eased with a fitted bezier, staying within tolerance of
+// every original key (and every frame of a long linear segment). All of a value's parts
+// share one ease, as players interpolate them: a path morphing along straight lines (any
+// vertices, one ease) fits as well as a number. Positions moving along a curve get a
+// motion path (`to`/`ti`). Authored eased keys, holds and existing motion paths stay.
 export function simplifyKeys(json, opts = {}) {
-	const tol = Object.assign({}, TOLERANCE, opts.tolerance)
 	let n = 0
-	forEachProp(json, (p, key, owner) => {
+	forEachLayerProp(json, opts, BUDGET.fit, (p, key, owner, tolFor, L) => {
 		if (!isAnimated(p) || p.k.length < 3 || p.x) return
 		const k = p.k
 		const vals = k.map((kf) => (kf.s === undefined ? null : flatten(kf.s)))
 		if (vals.some((v) => !v || v.length !== vals[0].length)) return
-		const dims = Array.isArray(k[0].s) && !isObj(k[0].s[0]) ? k[0].s.length : 1
-		const t = tol[category(key, owner)]
-		const keep = new Array(k.length).fill(false)
-		keep[0] = keep[k.length - 1] = true
-		for (let j = 0; j < k.length - 1; j++) {
-			if (!isLinearSegment(k[j], dims) || hasSpatial(k[j])) keep[j] = keep[j + 1] = true
+		const shape = Array.isArray(k[0].s) && isObj(k[0].s[0])
+		const dims = Array.isArray(k[0].s) && !shape ? k[0].s.length : 1
+		const kind = category(key, owner)
+		if (kind === 'time') return
+		const tol = tolFor(kind)
+		const motionPath = key === 'p' && !shape && (dims === 2 || (dims === 3 && vals.every((v) => Math.abs(v[2] - vals[0][2]) < EPS)))
+		const fittable = (j) => k[j].h !== 1 && !hasSpatial(k[j]) && (k[j + 1].t - k[j].t <= 1 + EPS || isLinearSegment(k[j], dims))
+
+		// the original's value part-way (u) through segment j, with its own ease
+		const between = (j, u) => {
+			const kf = k[j]
+			const lin = isLinearSegment(kf, dims)
+			return vals[j].map((v, d) => {
+				const c = shape ? 0 : d % dims
+				const y = lin ? u : easeAt({ x1: component(kf.o.x, c), y1: component(kf.o.y, c), x2: component(kf.i.x, c), y2: component(kf.i.y, c) }, u)
+				return v + (vals[j + 1][d] - v) * y
+			})
 		}
-		const rdp = (a, b) => {
-			let worst = -1,
-				at = -1
-			for (let j = a + 1; j < b; j++) {
-				const u = (k[j].t - k[a].t) / (k[b].t - k[a].t)
-				let err = 0
-				for (let d = 0; d < vals[j].length; d++) err = Math.max(err, Math.abs(vals[a][d] + (vals[b][d] - vals[a][d]) * u - vals[j][d]))
-				if (err > worst) (worst = err), (at = j)
+		// samples (time, value) of the original between keys a and b
+		const samples = (a, b) => {
+			const ts = [], vs = []
+			for (let j = a; j <= b; j++) {
+				ts.push(k[j].t)
+				vs.push(vals[j])
+				const gap = j < b ? k[j + 1].t - k[j].t : 0
+				// every half frame, so a curve can't swing out between the keys (players draw
+				// in-between frames, and time-remapped precomps land between them too)
+				const m = j < b ? Math.max(1, Math.min(64, Math.ceil(2 * gap) - 1)) : 0
+				for (let q = 1; q <= m; q++) {
+					const u = q / (m + 1)
+					ts.push(k[j].t + gap * u)
+					vs.push(between(j, u))
+				}
 			}
-			if (worst > t) {
-				keep[at] = true
-				rdp(a, at)
-				rdp(at, b)
+			return { ts, vs }
+		}
+		const fitSpan = (a, b) => {
+			const { ts, vs } = samples(a, b)
+			const A = vals[a], B = vals[b], t0 = k[a].t, span = k[b].t - t0
+			const us = ts.map((t) => (t - t0) / span)
+			const D = B.map((v, d) => v - A[d])
+			const dd = D.reduce((m, v) => m + v * v, 0)
+			const along = (e) => {
+				let worst = 0
+				for (let j = 0; j < vs.length; j++) {
+					const y = easeAt(e, us[j])
+					for (let d = 0; d < D.length; d++) worst = Math.max(worst, Math.abs(A[d] + D[d] * y - vs[j][d]))
+				}
+				return worst
+			}
+			if (dd < EPS) return along(LINEAR) <= tol ? { ease: LINEAR } : null
+			const ps = vs.map((v) => v.reduce((m, x, d) => m + (x - A[d]) * D[d], 0) / dd)
+			// a value off the straight line from A to B can't be reached by any ease
+			let off = 0
+			for (let j = 0; j < vs.length && off <= tol; j++) for (let d = 0; d < D.length; d++) off = Math.max(off, Math.abs(A[d] + D[d] * ps[j] - vs[j][d]))
+			if (off <= tol) {
+				const ease = fitEase(us, ps, along, tol)
+				if (ease) return { ease }
+			}
+			if (!motionPath || vs.length < 4) return null
+			return fitMotionPath(us, vs.map((v) => [v[0], v[1]]), tol)
+		}
+		const setEase = (kf, f) => {
+			// shapes and motion-path keys take one ease (lottie-web reads them as plain numbers)
+			const w = (v) => (shape || f.to ? v : new Array(dims).fill(v))
+			kf.o = { x: w(f.ease.x1), y: w(f.ease.y1) }
+			kf.i = { x: w(f.ease.x2), y: w(f.ease.y2) }
+			delete kf.h
+			delete kf.e
+			if (f.to) {
+				kf.to = dims === 3 ? f.to.concat(0) : f.to
+				kf.ti = dims === 3 ? f.ti.concat(0) : f.ti
 			}
 		}
-		let a = 0
-		for (let j = 1; j < k.length; j++) {
-			if (!keep[j]) continue
-			if (j - a > 1) rdp(a, j)
-			a = j
+
+		const kept = [k[0]]
+		for (let a = 0; a < k.length - 1; ) {
+			if (!fittable(a)) {
+				kept.push(k[++a])
+				continue
+			}
+			let end = a
+			while (end < k.length - 1 && fittable(end)) end++
+			// furthest key that one segment from `a` can reach: double, then halve
+			let good = a + 1, best = null, bad = null
+			for (let step = 1; good < end; step *= 2) {
+				const b = Math.min(good + step, end)
+				const f = fitSpan(a, b)
+				if (!f) {
+					bad = b
+					break
+				}
+				good = b
+				best = f
+			}
+			while (bad != null && bad - good > 1) {
+				const mid = (good + bad) >> 1
+				const f = fitSpan(a, mid)
+				if (f) (good = mid), (best = f)
+				else bad = mid
+			}
+			if (best && good > a + 1) {
+				setEase(k[a], best)
+				n += good - a - 1
+			}
+			kept.push(k[good])
+			a = good
 		}
-		const kept = k.filter((_, j) => keep[j])
-		n += k.length - kept.length
 		p.k = kept
 	})
 	return n
@@ -726,12 +978,47 @@ const isStaticIdentityTr = (tr) =>
 	(!tr.r || Math.abs(asArray(tr.r.k)[0] || 0) < EPS) &&
 	(!tr.sk || Math.abs(asArray(tr.sk.k)[0] || 0) < EPS)
 
-// Baked shapes that only move, turn or scale: keep the first frame's path and move the
-// group's transform instead. Only for frame-by-frame bakes (every key ≤ 1 frame apart),
-// where transform and vertex interpolation agree.
-// ponytail: similarity only (no skew / non-uniform scale); full affine fit if bakes need it.
+// Least-squares rotation + non-uniform scale (M = R·diag(sx, sy), Lottie's scale-then-
+// rotate order) + translation mapping P onto Q: a full affine fit with its shear dropped.
+function fitRotateScale(P, Q) {
+	const m = P.length
+	let px = 0, py = 0, qx = 0, qy = 0
+	for (let i = 0; i < m; i++) (px += P[i][0]), (py += P[i][1]), (qx += Q[i][0]), (qy += Q[i][1])
+	;(px /= m), (py /= m), (qx /= m), (qy /= m)
+	let sxx = 0, sxy = 0, syy = 0, a = 0, b = 0, c = 0, d = 0
+	for (let i = 0; i < m; i++) {
+		const x = P[i][0] - px, y = P[i][1] - py, u = Q[i][0] - qx, v = Q[i][1] - qy
+		sxx += x * x
+		sxy += x * y
+		syy += y * y
+		a += u * x
+		b += u * y
+		c += v * x
+		d += v * y
+	}
+	const det = sxx * syy - sxy * sxy
+	if (Math.abs(det) < EPS) return null
+	const m11 = (a * syy - b * sxy) / det, m12 = (b * sxx - a * sxy) / det
+	const m21 = (c * syy - d * sxy) / det, m22 = (d * sxx - c * sxy) / det
+	const th = Math.atan2(m21, m11), co = Math.cos(th), si = Math.sin(th)
+	const sx = Math.hypot(m11, m21), sy = -si * m12 + co * m22
+	const M = [co * sx, -si * sy, si * sx, co * sy]
+	const tx = qx - (M[0] * px + M[1] * py), ty = qy - (M[2] * px + M[3] * py)
+	let err = 0
+	for (let i = 0; i < m; i++) {
+		const x = M[0] * P[i][0] + M[1] * P[i][1] + tx, y = M[2] * P[i][0] + M[3] * P[i][1] + ty
+		err = Math.max(err, Math.hypot(x - Q[i][0], y - Q[i][1]))
+	}
+	return { th, sx, sy, tx, ty, err }
+}
+
+// Baked shapes that only move, turn or scale (also squash and stretch): keep the first
+// frame's path and animate the group's transform instead. Only for frame-by-frame bakes
+// (every key ≤ 1 frame apart), where transform and vertex interpolation agree.
+// ponytail: no shear (Lottie skew support varies by player); add sk/sa if bakes need it.
 export function recoverRigidMotion(json, opts = {}) {
-	const tol = opts.tolerance != null ? opts.tolerance : TOLERANCE.px
+	const ctx = layerContexts(json, opts.display || 1)
+	let tol
 	let n = 0
 	const visit = (items) => {
 		if (!Array.isArray(items)) return
@@ -760,18 +1047,21 @@ export function recoverRigidMotion(json, opts = {}) {
 			let ok = true,
 				prev = 0
 			for (const f of frameShapes) {
-				const fit = fitSimilarity(P, shapePoints(f), !stroked) // scaling a group scales its stroke
+				const Q = shapePoints(f)
+				let fit = fitSimilarity(P, Q, !stroked) // scaling a group scales its stroke
+				if (fit.err > tol && !stroked) fit = fitRotateScale(P, Q) || fit
 				if (fit.err > tol) {
 					ok = false
 					break
 				}
+				if (fit.sx == null) fit.sx = fit.sy = fit.s
 				let deg = (fit.th * 180) / Math.PI
 				while (deg - prev > 180) deg -= 360
 				while (deg - prev < -180) deg += 360
 				prev = deg
-				const k = Math.cos(fit.th) * fit.s,
-					sn = Math.sin(fit.th) * fit.s
-				fits.push({ p: [k * c[0] - sn * c[1] + fit.tx, sn * c[0] + k * c[1] + fit.ty], r: deg, s: fit.s * 100 })
+				const co = Math.cos(fit.th), sn = Math.sin(fit.th)
+				const x = c[0] * fit.sx, y = c[1] * fit.sy
+				fits.push({ p: [co * x - sn * y + fit.tx, sn * x + co * y + fit.ty], r: deg, s: [fit.sx * 100, fit.sy * 100] })
 			}
 			if (!ok) continue
 			const ease = (j) => {
@@ -784,14 +1074,19 @@ export function recoverRigidMotion(json, opts = {}) {
 			tr.a = { a: 0, k: c }
 			tr.p = keys((f) => f.p)
 			tr.r = keys((f) => [f.r])
-			if (!stroked) tr.s = keys((f) => [f.s, f.s])
+			if (!stroked) tr.s = keys((f) => f.s)
 			paths.forEach((x) => {
 				x.ks = { a: 0, k: x.ks.k[0].s[0] }
 			})
 			n++
 		}
 	}
-	for (const layers of layerLists(json)) for (const L of layers) visit(L.shapes)
+	for (const layers of layerLists(json))
+		for (const L of layers) {
+			const share = (opts.accuracy != null ? opts.accuracy : 0.25) * BUDGET.rigid
+			tol = opts.tolerance != null ? opts.tolerance : share / ctx.get(L).scale
+			visit(L.shapes)
+		}
 	return n
 }
 
@@ -811,12 +1106,15 @@ const roundDeep = (v, d) => {
 	return v
 }
 
-// Decimals per kind of value instead of one global precision.
+// Rounds every value to the fewest decimals whose rounding can't be seen at the target
+// accuracy, worked out per layer and kind of value. opts.decimals fixes them per kind.
 export function roundPrecision(json, opts = {}) {
-	const dec = Object.assign({}, DECIMALS, opts.decimals)
+	const fixed = opts.decimals || {}
 	let n = 0
-	forEachProp(json, (p, key, owner) => {
-		const d = dec[category(key, owner)]
+	forEachLayerProp(json, opts, BUDGET.round, (p, key, owner, tolFor) => {
+		const kind = category(key, owner)
+		const d = fixed[kind] != null ? fixed[kind] : decimalsFor(tolFor(kind))
+		const dpx = fixed.px != null ? fixed.px : decimalsFor(tolFor('px'))
 		n++
 		if (!isAnimated(p)) {
 			p.k = roundDeep(p.k, d)
@@ -825,12 +1123,33 @@ export function roundPrecision(json, opts = {}) {
 		for (const kf of p.k) {
 			if (kf.s !== undefined) kf.s = roundDeep(kf.s, d)
 			if (kf.e !== undefined) kf.e = roundDeep(kf.e, d)
-			if (kf.to) kf.to = roundDeep(kf.to, dec.px)
-			if (kf.ti) kf.ti = roundDeep(kf.ti, dec.px)
-			if (kf.i) kf.i = roundDeep(kf.i, dec.tangent)
-			if (kf.o) kf.o = roundDeep(kf.o, dec.tangent)
+			if (kf.to) kf.to = roundDeep(kf.to, dpx)
+			if (kf.ti) kf.ti = roundDeep(kf.ti, dpx)
+			if (kf.i) kf.i = roundDeep(kf.i, 3)
+			if (kf.o) kf.o = roundDeep(kf.o, 3)
 			if (typeof kf.t === 'number') kf.t = roundTo(kf.t, 3)
 		}
+	})
+	return n
+}
+
+// Removes path points that don't change the outline at the target accuracy: points on a
+// straight line, doubled points and points along a smooth curve, refitting the curve
+// either side. Only still paths; layers with modifiers that work per point (round
+// corners, zig zag, pucker, offset) are left alone.
+// ponytail: still paths only; animated paths would need the same points removed from every key.
+export function simplifyPaths(json, opts = {}) {
+	let n = 0
+	const perPoint = new Map() // layer -> has a per-point modifier
+	forEachLayerProp(json, opts, BUDGET.fit, (p, key, owner, tolFor, L) => {
+		if (key !== 'ks' && key !== 'pt') return
+		if (isAnimated(p) || !isObj(p.k) || !Array.isArray(p.k.v)) return
+		if (!perPoint.has(L)) perPoint.set(L, /"ty":"(rd|zz|pb|op)"/.test(JSON.stringify(L.shapes || [])))
+		if (perPoint.get(L)) return
+		const r = simplifyPath(p.k, tolFor('px'))
+		if (!r) return
+		p.k = r.shape
+		n += r.removed
 	})
 	return n
 }
@@ -966,7 +1285,8 @@ export const PASSES = [
 	{ id: 'trimToLayerRange', label: 'Trim keys outside each layer’s time range', group: 'lossless', on: true, run: trimToLayerRange },
 	{ id: 'recoverRigidMotion', label: 'Turn baked moving shapes back into transforms', group: 'lossy', on: true, run: recoverRigidMotion },
 	{ id: 'holdJumps', label: 'Hold one-frame jumps', group: 'lossless', on: true, run: holdJumps, options: { all: false } },
-	{ id: 'simplifyKeys', label: 'Simplify keyframes within tolerance', group: 'lossy', on: true, run: simplifyKeys },
+	{ id: 'simplifyKeys', label: 'Fit keyframes with curves', group: 'lossy', on: true, run: simplifyKeys },
+	{ id: 'simplifyPaths', label: 'Simplify still paths', group: 'lossy', on: true, run: simplifyPaths },
 	{ id: 'roundPrecision', label: 'Round values (decimals per kind)', group: 'lossy', on: true, run: roundPrecision },
 	{ id: 'instanceLayers', label: 'Share identical layers as one precomp', group: 'lossless', on: true, run: instanceLayers },
 	{ id: 'flattenShapeGroups', label: 'Flatten nested shape groups', group: 'lossless', on: true, run: flattenShapeGroups },
@@ -980,7 +1300,7 @@ export const PASSES = [
 
 const clone = (v) => JSON.parse(JSON.stringify(v))
 
-// settings: { [passId]: true | false | {options} , exponent, pretty }
+// settings: { [passId]: true | false | {options}, accuracy (px), display (scale it plays at), exponent, pretty }
 export function optimise(input, settings = {}) {
 	const json = clone(input)
 	const fmt = { exponent: !!settings.exponent, pretty: !!settings.pretty }
@@ -988,7 +1308,7 @@ export function optimise(input, settings = {}) {
 	for (const pass of PASSES) {
 		const s = settings[pass.id] !== undefined ? settings[pass.id] : pass.on
 		if (!s) continue
-		const opts = Object.assign({}, pass.options, isObj(s) ? s : {})
+		const opts = Object.assign({ accuracy: settings.accuracy, display: settings.display }, pass.options, isObj(s) ? s : {})
 		const changes = pass.run(json, opts)
 		report.push({ id: pass.id, changes, bytes: JSON.stringify(json).length })
 	}

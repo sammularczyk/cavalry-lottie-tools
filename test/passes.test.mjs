@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import * as P from '../src/modules/passes.js'
+import * as F from '../src/modules/fit.js'
 
 const kf = (t, s, extra = {}) => ({ t, s, ...extra })
 const lin = { i: { x: [1], y: [1] }, o: { x: [0], y: [0] } }
@@ -321,4 +322,79 @@ test('flattenShapeGroups lifts sole identity groups and keeps every scope', () =
 	assert.deepEqual(L2.shapes[0].it.map((x) => x.ty), ['sh', 'fl', 'tr'])
 	assert.deepEqual(L2.shapes[0].it[2].p.k, [5, 5])
 	assert.deepEqual(L3.shapes.map((x) => x.ty), ['gr', 'gr'])
+})
+
+// ---------- curve fitting ----------
+
+const smooth = (u) => u * u * (3 - 2 * u) // ease in-out
+const baked = (n, f) => Array.from({ length: n + 1 }, (_, t) => kf(t, f(t / n), linKey))
+
+test('simplifyKeys: a baked ease in-out becomes two eased keys, within tolerance at every frame', () => {
+	const p = { a: 1, k: baked(30, (u) => [100 * smooth(u)]) }
+	const before = p.k.map((k) => k.s[0])
+	P.simplifyKeys({ layers: [layer({ ks: { o: p } })] })
+	assert.equal(p.k.length, 2)
+	const e = { x1: p.k[0].o.x[0], y1: p.k[0].o.y[0], x2: p.k[0].i.x[0], y2: p.k[0].i.y[0] }
+	before.forEach((v, t) => assert.ok(Math.abs(100 * F.easeAt(e, t / 30) - v) < 0.3))
+})
+
+test('simplifyKeys: a baked path morph (straight-line vertices, one ease) becomes two keys', () => {
+	const p = { a: 1, k: baked(24, (u) => [square(0, 0, 0, 1 + 2 * smooth(u))]) }
+	P.simplifyKeys({ layers: [layer({ shapes: [{ ty: 'sh', ks: p }] })] })
+	assert.equal(p.k.length, 2)
+	assert.equal(typeof p.k[0].o.x, 'number') // shapes take one ease, not one per value
+})
+
+test('simplifyKeys: baked motion along an arc gets a motion path', () => {
+	const p = { a: 1, k: baked(30, (u) => [100 * Math.cos((u * Math.PI) / 2), 100 * Math.sin((u * Math.PI) / 2)]) }
+	P.simplifyKeys({ layers: [layer({ ks: { p } })] })
+	assert.ok(p.k.length <= 3, p.k.length + ' keys')
+	assert.ok(p.k[0].to && p.k[0].ti)
+	assert.equal(typeof p.k[0].o.x, 'number') // lottie-web reads motion-path eases as numbers
+})
+
+test('accuracy is on screen: a layer drawn 10× larger keeps finer values', () => {
+	const make = (s) => ({ layers: [layer({ ks: { s: { a: 0, k: [s, s] }, o: { a: 0, k: 100 } }, shapes: [{ ty: 'sh', ks: { a: 0, k: { c: false, v: [[1.23456, 0], [5, 5]], i: [[0, 0], [0, 0]], o: [[0, 0], [0, 0]] } } }] })] })
+	const a = make(100), b = make(1000)
+	P.roundPrecision(a)
+	P.roundPrecision(b)
+	assert.equal(a.layers[0].shapes[0].ks.k.v[0][0], 1.23)
+	assert.equal(b.layers[0].shapes[0].ks.k.v[0][0], 1.235)
+})
+
+test('recoverRigidMotion: squash and stretch while turning becomes non-uniform scale', () => {
+	const keys = Array.from({ length: 8 }, (_, t) => {
+		const sq = square(0, 0, 0)
+		const sx = 1 + t * 0.1, sy = 1 - t * 0.05, th = t * 0.2
+		sq.v = sq.v.map(([x, y]) => [x * sx * Math.cos(th) - y * sy * Math.sin(th) + t, x * sx * Math.sin(th) + y * sy * Math.cos(th)])
+		return kf(t, [sq], linKey)
+	})
+	const tr = { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 } }
+	const g = { ty: 'gr', it: [{ ty: 'sh', ks: { a: 1, k: keys } }, { ty: 'fl' }, tr] }
+	assert.equal(P.recoverRigidMotion({ layers: [layer({ shapes: [g] })] }), 1)
+	const last = tr.s.k[7].s
+	assert.ok(Math.abs(last[0] - 170) < 1e-6 && Math.abs(last[1] - 65) < 1e-6, String(last))
+})
+
+test('simplifyPaths: points on straight edges go, corners stay; per-point modifiers block it', () => {
+	const pts = [[0, 0], [5, 0], [10, 0], [10, 5], [10, 10], [0, 10]]
+	const sh = () => ({ ty: 'sh', ks: { a: 0, k: { c: true, v: pts, i: pts.map(() => [0, 0]), o: pts.map(() => [0, 0]) } } })
+	const j = { layers: [layer({ shapes: [sh()] }), layer({ ind: 2, shapes: [sh(), { ty: 'rd', r: { a: 0, k: 4 } }] })] }
+	assert.equal(P.simplifyPaths(j), 2)
+	assert.deepEqual(j.layers[0].shapes[0].ks.k.v, [[0, 0], [10, 0], [10, 10], [0, 10]])
+	assert.equal(j.layers[1].shapes[0].ks.k.v.length, 6)
+})
+
+test('simplifyPaths: a circle drawn with 16 points refits to fewer, staying on the circle', () => {
+	const n = 16, r = 100, h = (4 / 3) * Math.tan(Math.PI / (2 * n)) * r
+	const v = [], i = [], o = []
+	for (let q = 0; q < n; q++) {
+		const a = (q / n) * 2 * Math.PI, c = Math.cos(a), s = Math.sin(a)
+		v.push([r * c, r * s])
+		i.push([h * s, -h * c])
+		o.push([-h * s, h * c])
+	}
+	const ks = { a: 0, k: { c: true, v, i, o } }
+	P.simplifyPaths({ layers: [layer({ shapes: [{ ty: 'sh', ks }] })] })
+	assert.ok(ks.k.v.length <= 6, ks.k.v.length + ' points')
 })
