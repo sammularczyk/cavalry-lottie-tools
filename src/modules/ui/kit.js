@@ -146,3 +146,136 @@ export function list(height, T) {
 	scroll.setFixedHeight(height)
 	return { widget: scroll, layout: l }
 }
+
+// ---------- tab strip (Easey's segmented tabs, chrome.js) ----------
+// ui.TabView can't be styled and ui.Button has no selected state or hover, so tabs are
+// Containers with a drawn icon (ui.Image can't be tinted) driving a ui.PageView.
+
+var TAB_HEIGHT = 25,
+	STRIP_RADIUS = 5,
+	TAB_RADIUS = 3,
+	TAB_GAP = 2,
+	STRIP_PADDING = 3
+
+// Glyphs traced y-down on their own viewBox; drawn y-up via flipY.
+export var ICONS = {
+	export: {
+		width: 12,
+		height: 12,
+		strokeWidth: 1.5,
+		build: function (p) {
+			p.moveTo(1, 7)
+			p.lineTo(1, 11)
+			p.lineTo(11, 11)
+			p.lineTo(11, 7)
+			p.moveTo(6, 8)
+			p.lineTo(6, 1)
+			p.moveTo(3, 4)
+			p.lineTo(6, 1)
+			p.lineTo(9, 4)
+		},
+	},
+	preflight: {
+		width: 12,
+		height: 12,
+		strokeWidth: 1.5,
+		build: function (p) {
+			p.moveTo(1, 6.5)
+			p.lineTo(4.5, 10)
+			p.lineTo(11, 2)
+		},
+	},
+}
+
+function flipY(path, height) {
+	return {
+		moveTo: function (x, y) {
+			path.moveTo(x, height - y)
+		},
+		lineTo: function (x, y) {
+			path.lineTo(x, height - y)
+		},
+	}
+}
+
+function drawIcon(canvas, icon, color, background) {
+	canvas.clearPaths()
+	if (background) canvas.setBackgroundColor(background)
+	var path = new cavalry.Path()
+	icon.build(flipY(path, icon.height))
+	canvas.addPath(path.toObject(), { color: color, stroke: true, strokeWidth: icon.strokeWidth })
+	canvas.redraw()
+}
+
+// tabs: [{label, icon}] -> {widget, setSelected(i)}; onSelect(i) on click
+export function tabStrip(tabs, onSelect, T) {
+	var trough = T.raised,
+		hoverBg = T.mix(T.raised, T.surface, 0.5)
+	var rowLayout = new ui.HLayout()
+	rowLayout.setSpaceBetween(TAB_GAP)
+	rowLayout.setMargins(STRIP_PADDING, STRIP_PADDING, STRIP_PADDING, STRIP_PADDING)
+	var entries = [],
+		selected = 0
+	var paint = function (i) {
+		var e = entries[i],
+			on = i === selected
+		var bg = on ? T.surface : e.hovered ? hoverBg : trough
+		e.box.setBackgroundColor(bg)
+		e.label.setTextColor(on ? T.text : T.muted)
+		drawIcon(e.canvas, e.icon, on ? T.accent : T.muted, bg)
+	}
+	var paintAll = function () {
+		for (var i = 0; i < entries.length; i++) paint(i)
+	}
+	tabs.forEach(function (tab) {
+		var icon = ICONS[tab.icon]
+		var canvas = new ui.Draw()
+		canvas.setSize(icon.width, icon.height)
+		canvas.setTransparentForMouseEvents(true)
+		var l = label(tab.label, 12)
+		var content = new ui.HLayout()
+		content.setSpaceBetween(6)
+		content.setMargins(0, 0, 0, 0)
+		content.addStretch()
+		content.add(canvas)
+		content.add(l)
+		content.addStretch()
+		var box = new ui.Container()
+		box.setRadius(TAB_RADIUS, TAB_RADIUS, TAB_RADIUS, TAB_RADIUS)
+		box.setFixedHeight(TAB_HEIGHT)
+		box.setLayout(content)
+		box.useHoverEvents(true)
+		entries.push({ box: box, canvas: canvas, label: l, icon: icon, hovered: false })
+		rowLayout.add(box)
+	})
+	// second pass so each closure keeps its own index
+	entries.forEach(function (e, i) {
+		e.box.onMousePress = function () {
+			if (i === selected) return
+			selected = i
+			paintAll()
+			if (onSelect) onSelect(i)
+		}
+		e.box.onMouseEnter = function () {
+			e.hovered = true
+			paint(i)
+		}
+		e.box.onMouseLeave = function () {
+			e.hovered = false
+			paint(i)
+		}
+	})
+	var strip = new ui.Container()
+	strip.setBackgroundColor(trough)
+	strip.setRadius(STRIP_RADIUS, STRIP_RADIUS, STRIP_RADIUS, STRIP_RADIUS)
+	strip.setFixedHeight(TAB_HEIGHT + STRIP_PADDING * 2)
+	strip.setLayout(rowLayout)
+	paintAll()
+	return {
+		widget: strip,
+		setSelected: function (i) {
+			selected = i
+			paintAll()
+		},
+	}
+}
