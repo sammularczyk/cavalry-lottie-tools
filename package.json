@@ -1,0 +1,19 @@
+{
+	"name": "cavalry-lottie-tools",
+	"displayName": "Lottie Tools",
+	"version": "0.1.0",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"dev": "cross-env NODE_ENV=development npx bundler",
+		"release": "cross-env NODE_ENV=production npx bundler",
+		"test": "node --test test/*.test.mjs"
+	},
+	"devDependencies": {
+		"@scenery/bundler": "^1.0.0",
+		"@scenery/cavalry-types": "^0.5.0",
+		"cross-env": "^10.1.0",
+		"dotenv": "^17.2.3",
+		"prettier": "^3.2.5"
+	}
+}
