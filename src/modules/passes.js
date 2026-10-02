@@ -485,6 +485,43 @@ function flatten(s) {
 	return s.every((v) => typeof v === 'number') ? s : null
 }
 
+// Smallest one-frame change that counts as a jump, per kind of value.
+const JUMP = { px: 2, scale: 2, angle: 2, opacity: 5, color: 0.05 }
+
+// Cavalry and After Effects show whole frames; Lottie players draw in-between frames on
+// fast displays. A value that jumps from one frame to the next (a baked path wrapping
+// round, a layer snapping into place) then slides instead. Hold the key before each
+// one-frame jump. opts.all holds every one-frame key, so playback steps exactly like
+// Cavalry's frames.
+export function holdJumps(json, opts = {}) {
+	let n = 0
+	forEachProp(json, (p, key, owner) => {
+		if (!isAnimated(p) || p.k.length < 2) return
+		const k = p.k
+		const vals = k.map((kf) => (kf.s === undefined ? null : flatten(kf.s)))
+		const rate = (i) => {
+			if (!vals[i] || !vals[i + 1] || k[i].h === 1 || vals[i].length !== vals[i + 1].length) return null
+			let d = 0
+			for (let x = 0; x < vals[i].length; x++) d = Math.max(d, Math.abs(vals[i + 1][x] - vals[i][x]))
+			return d / Math.max(k[i + 1].t - k[i].t, 1e-9)
+		}
+		const rates = k.slice(0, -1).map((_, i) => rate(i))
+		const min = JUMP[category(key, owner)]
+		for (let i = 0; i < k.length - 1; i++) {
+			if (k[i + 1].t - k[i].t > 1 + EPS || rates[i] == null || k[i].h === 1) continue
+			const around = [rates[i - 1], rates[i + 1]].filter((v) => v != null)
+			const jump = rates[i] > min && rates[i] > 5 * Math.max(0, ...around)
+			if (!opts.all && !jump) continue
+			if (!opts.all && !(rates[i] > 0)) continue
+			k[i].h = 1
+			delete k[i].i
+			delete k[i].o
+			n++
+		}
+	})
+	return n
+}
+
 // RDP over time: drop keys whose value lies within tol of the straight line between the
 // keys kept either side. Only runs of linear segments are touched; eased, held and
 // spatial keys always stay.
@@ -814,6 +851,7 @@ export const PASSES = [
 	{ id: 'dedupeAssets', label: 'Merge identical assets', group: 'lossless', on: true, run: dedupeAssets },
 	{ id: 'trimToLayerRange', label: 'Trim keys outside each layer’s time range', group: 'lossless', on: true, run: trimToLayerRange },
 	{ id: 'recoverRigidMotion', label: 'Turn baked moving shapes back into transforms', group: 'lossy', on: true, run: recoverRigidMotion },
+	{ id: 'holdJumps', label: 'Hold one-frame jumps', group: 'lossless', on: true, run: holdJumps, options: { all: false } },
 	{ id: 'simplifyKeys', label: 'Simplify keyframes within tolerance', group: 'lossy', on: true, run: simplifyKeys },
 	{ id: 'roundPrecision', label: 'Round values (decimals per kind)', group: 'lossy', on: true, run: roundPrecision },
 	{ id: 'instanceLayers', label: 'Share identical layers as one precomp', group: 'lossless', on: true, run: instanceLayers },

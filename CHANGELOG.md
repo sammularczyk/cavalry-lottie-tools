@@ -13,3 +13,4 @@
 - Exporter: layers running to their comp's last frame no longer vanish on it (Cavalry's end frame is inclusive, Lottie's exclusive), fixing a one-frame flash each time a precomp loops.
 - Exporter: parent opacity is folded into children (Cavalry children inherit it, Lottie children don't), and group opacity is read from the scene (the writer drops it).
 - Exporter: static rotation and scale are taken from the scene (the writer exported some comp references unrotated).
+- Optimiser: "Hold one-frame jumps" (on by default) holds the key before a value that jumps between adjacent frames, so players drawing in-between frames don't slide it; optional "Hold every frame-by-frame key" steps exactly like Cavalry's frames.

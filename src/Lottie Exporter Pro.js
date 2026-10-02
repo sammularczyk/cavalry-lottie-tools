@@ -17,7 +17,7 @@ var PREF_KEY = 'lottieTools_exporter'
 // ---------- settings ----------
 
 function defaults() {
-	var s = { exponent: true, pretty: false, stripNames: false, precomps: true, bakeMode: 0, tab: 0, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
+	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, precomps: true, bakeMode: 0, tab: 0, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
 	PASSES.forEach(function (p) {
 		s[p.id] = p.on
 	})
@@ -60,6 +60,7 @@ var TIPS = {
 	removeDefaults: ['Zero skew, auto-orient off, empty names.', 'Zero skew, empty names'],
 	unwrapScalars: ['Store [5] as 5 on static values.', '[5] → 5'],
 	stripMeta: ['ln, cl, meta and effect match names.', 'ln, cl, meta, match names'],
+	holdJumps: ['Players draw in-between frames on fast displays, so a value that jumps from one frame to the next (a baked path wrapping round, a layer snapping into place) would slide. Holds the key before each one-frame jump, as Cavalry shows it.', 'Snaps stay snaps between frames'],
 	recoverRigidMotion: ['Baked duplicator/deformer copies that only move, turn or scale keep one path and animate their transform instead. Biggest saving on baked scenes.', 'Baked copies → one path + transform'],
 	simplifyKeys: ['Drops baked keys that lie within a fraction of a pixel (or degree, or %) of a straight line between their neighbours.', 'Baked keys within ¼ px of a line'],
 	roundPrecision: ['Positions and paths to 0.01 px, opacity to 0.1, colours to 0.001.', '0.01 px, 0.1 opacity, 0.001 colour'],
@@ -250,6 +251,7 @@ var opts = list(260, T)
 		if (p.group === group) opts.layout.add(optionRow(p.id, p.label, tip[0], tip[1]))
 	})
 })
+opts.layout.add(optionRow('holdAll', 'Hold every frame-by-frame key', 'Every key one frame from the next holds until the next frame, so playback steps exactly like Cavalry’s frames even on 120 Hz screens. Smooth baked motion then steps at the comp’s frame rate.', 'Exact Cavalry frames, no in-betweens'))
 opts.layout.add(label('Output', 10, T.muted))
 opts.layout.add(optionRow('stripNames', 'Strip layer and shape names', 'Keeps names that expressions refer to. Leave off if apps look layers up by name (iOS/Android KeyPaths).', 'Breaks name lookups in apps'))
 opts.layout.add(optionRow('exponent', 'Short number format', 'Writes very small and very large numbers in exponent form.', '0.000001 → 1e-6'))
@@ -279,6 +281,7 @@ function passSettings() {
 		o[p.id] = settings[p.id]
 	})
 	if (settings.stripMeta) o.stripMeta = { names: settings.stripNames }
+	if (settings.holdJumps) o.holdJumps = { all: settings.holdAll }
 	return o
 }
 

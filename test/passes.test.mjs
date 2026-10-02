@@ -243,3 +243,21 @@ test('instanceLayers: identical shape layers share one precomp; anchor shifts by
 	assert.deepEqual(inner.shapes, shapes)
 	assert.equal(inner.bm, undefined, 'blend stays on the outer layer')
 })
+
+test('holdJumps holds the key before a one-frame jump, leaves smooth runs and spaced keys alone', () => {
+	const lin = { o: { x: [0], y: [0] }, i: { x: [1], y: [1] } }
+	// steady 1 px/frame, then a 100 px jump between frames 3 and 4, then steady again
+	const vals = [0, 1, 2, 3, 103, 104, 105]
+	const p = { a: 1, k: vals.map((v, t) => kf(t, [v, 0], { ...lin })) }
+	const spaced = { a: 1, k: [kf(0, [0], { ...lin }), kf(10, [500])] } // a slow move over 10 frames
+	const j = { layers: [layer({ ks: { p, o: spaced } })] }
+	assert.equal(P.holdJumps(j), 1)
+	assert.equal(p.k[3].h, 1)
+	assert.equal(p.k[3].i, undefined)
+	assert.ok(p.k.every((k, i) => i === 3 || k.h !== 1))
+	assert.equal(spaced.k[0].h, undefined)
+	// all: every one-frame key steps (Cavalry-style frames)
+	const q = { a: 1, k: [0, 1, 2].map((v, t) => kf(t, [v], { ...lin })) }
+	P.holdJumps({ layers: [layer({ ks: { o: q } })] }, { all: true })
+	assert.deepEqual(q.k.map((k) => k.h), [1, 1, undefined])
+})
