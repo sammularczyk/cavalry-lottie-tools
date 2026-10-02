@@ -495,12 +495,13 @@ export function flattenShapeGroups(json) {
 		for (;;) {
 			const rest = items.filter((it) => it.ty !== 'tr')
 			const ownTr = items.find((it) => it.ty === 'tr')
-			if (rest.length !== 1 || rest[0].ty !== 'gr' || !identityTr(ownTr)) return items
+			if (rest.length !== 1 || rest[0].ty !== 'gr') return items
 			const g = rest[0]
 			if (g.hd || (g.bm && g.bm !== 0) || !Array.isArray(g.it)) return items
 			const inner = g.it.find((it) => it.ty === 'tr')
+			// an identity inner group adds nothing, whatever this level's transform is
 			if (identityTr(inner)) items = g.it.filter((it) => it.ty !== 'tr').concat(ownTr ? [ownTr] : [])
-			else if (!top) items = g.it.slice() // this level's transform is the identity: the inner one replaces it
+			else if (!top && identityTr(ownTr)) items = g.it.slice() // the inner transform replaces this level's identity one
 			else return items
 			n++
 		}
@@ -1271,6 +1272,193 @@ export function serialise(json, { pretty = false, exponent = false } = {}) {
 	return out(json, '')
 }
 
+// A layer transform as a shape-group transform (2D values; layer values carry a z).
+function groupTransform(ks) {
+	const flat2 = (p, def) => {
+		if (!p) return { a: 0, k: def }
+		const cut = (v) => (Array.isArray(v) && v.length > 2 ? v.slice(0, 2) : v)
+		if (!isAnimated(p)) return { a: 0, k: cut(p.k) }
+		return {
+			a: 1,
+			k: p.k.map((kf) => {
+				const o = Object.assign({}, kf)
+				for (const f of ['s', 'e', 'to', 'ti']) if (o[f]) o[f] = cut(o[f])
+				return o
+			}),
+		}
+	}
+	let pos = ks.p
+	if (pos && pos.s) pos = { a: 0, k: [asArray(pos.x.k)[0], asArray(pos.y.k)[0]] } // only static split positions get here
+	const tr = { ty: 'tr', p: flat2(pos, [0, 0]), a: flat2(ks.a, [0, 0]), s: flat2(ks.s, [100, 100]), r: ks.r || { a: 0, k: 0 }, o: ks.o || { a: 0, k: 100 } }
+	if (ks.sk) tr.sk = ks.sk
+	if (ks.sa) tr.sa = ks.sa
+	return tr
+}
+
+// Cavalry writes every shape as its own layer; After Effects files hold many shapes in one
+// layer as groups. Runs of neighbouring shape layers with the same parent and timing become
+// one layer, each old layer a group carrying its transform. Lossless: only layers that
+// nothing parents to, mattes or masks, at normal blend, 2D, and whose opacity can't change
+// how their own shapes overlap (100%, or a single fill or stroke).
+// ponytail: animated split (x/y) positions keep their layer; iOS shape transforms don't split.
+export function mergeShapeLayers(json) {
+	if (hasExpressions(json)) return 0 // expressions can name layers
+	let n = 0
+	const paints = (items) => {
+		let c = 0
+		const walk = (its) => (its || []).forEach((it) => (it.ty === 'gr' ? walk(it.it) : ['fl', 'st', 'gf', 'gs'].includes(it.ty) && c++))
+		walk(items)
+		return c
+	}
+	for (const layers of layerLists(json)) {
+		const parents = new Set(layers.map((l) => l.parent).filter((p) => p != null))
+		const ok = (l) => {
+			if (l.ty !== 4 || parents.has(l.ind) || l.tt || l.td || l.tp || l.masksProperties || l.ef || l.bm || l.hd || l.ddd || l.ao) return false
+			const ks = l.ks || {}
+			if (ks.p && ks.p.s && (isAnimated(ks.p.x) || isAnimated(ks.p.y))) return false
+			if (ks.rx || ks.ry || ks.or) return false
+			const o = ks.o
+			const full = !o || (!isAnimated(o) && Math.abs(asArray(o.k)[0] - 100) < EPS)
+			return full || paints(l.shapes) <= 1
+		}
+		const same = (a, b) => a.parent === b.parent && a.ip === b.ip && a.op === b.op && (a.st || 0) === (b.st || 0) && (a.sr || 1) === (b.sr || 1)
+		const out = []
+		for (let i = 0; i < layers.length; ) {
+			let j = i + 1
+			if (ok(layers[i])) while (j < layers.length && ok(layers[j]) && same(layers[i], layers[j])) j++
+			if (j - i < 2) {
+				out.push(layers[i++])
+				continue
+			}
+			const run = layers.slice(i, j)
+			const merged = Object.assign({}, run[0], {
+				ks: { o: { a: 0, k: 100 }, r: { a: 0, k: 0 }, p: { a: 0, k: [0, 0, 0] }, a: { a: 0, k: [0, 0, 0] }, s: { a: 0, k: [100, 100, 100] } },
+				shapes: run.map((l) => ({ ty: 'gr', nm: l.nm, it: (l.shapes || []).concat([groupTransform(l.ks || {})]) })),
+			})
+			out.push(merged)
+			n += run.length - 1
+			i = j
+		}
+		layers.length = 0
+		layers.push(...out)
+	}
+	return n
+}
+
+// Bounds of a group's drawing items over all their keys, grown by its widest stroke;
+// null when something can't be bounded.
+function itemsBounds(items) {
+	let b = null
+	const grow = (x, y) => (b = b ? [Math.min(b[0], x), Math.min(b[1], y), Math.max(b[2], x), Math.max(b[3], y)] : [x, y, x, y])
+	const values = (p) => (!p ? [] : isAnimated(p) ? p.k.map((k) => k.s).filter((v) => v !== undefined) : [p.k])
+	let pad = 0
+	for (const it of items) {
+		if (it.ty === 'gr') {
+			const inner = itemsBounds((it.it || []).filter((x) => x.ty !== 'tr')) // path-only groups have identity transforms
+			if (!inner) return null
+			grow(inner[0], inner[1])
+			grow(inner[2], inner[3])
+		} else if (it.ty === 'sh') {
+			for (const v of values(it.ks))
+				for (const sh of asArray(v)) {
+					if (!sh || !sh.v) return null
+					sh.v.forEach((q, i) => {
+						grow(q[0], q[1])
+						grow(q[0] + sh.i[i][0], q[1] + sh.i[i][1])
+						grow(q[0] + sh.o[i][0], q[1] + sh.o[i][1])
+					})
+				}
+		} else if (it.ty === 'rc' || it.ty === 'el') {
+			for (const c of values(it.p)) for (const sz of values(it.s)) grow(c[0] - sz[0] / 2, c[1] - sz[1] / 2), grow(c[0] + sz[0] / 2, c[1] + sz[1] / 2)
+		} else if (it.ty === 'sr') {
+			const r = Math.max(...values(it.or).map((v) => asArray(v)[0]))
+			for (const c of values(it.p)) grow(c[0] - r, c[1] - r), grow(c[0] + r, c[1] + r)
+		} else if (it.ty === 'st' || it.ty === 'gs') {
+			const w = Math.max(...values(it.w).map((v) => asArray(v)[0]))
+			pad = Math.max(pad, (w / 2) * Math.max(it.ml || 4, 1)) // miter joins reach furthest
+		}
+	}
+	return b && [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad]
+}
+
+const PATH_ITEMS = ['sh', 'rc', 'el', 'sr']
+const PAINT_ITEMS = ['fl', 'st', 'gf', 'gs']
+// A path, or a group holding only paths under an identity transform (Cavalry nests them).
+const isPathItem = (x) =>
+	PATH_ITEMS.includes(x.ty) || (x.ty === 'gr' && !x.hd && !x.bm && Array.isArray(x.it) && x.it.every((y) => (y.ty === 'tr' ? identityTr(y) : isPathItem(y))))
+
+// Cavalry's writer puts a shape's fills and strokes both inside the group holding its
+// path and again on the group around it, so every path is painted twice: double the paint
+// data, darker anti-aliased edges, and see-through paint drawn twice as strong. When a
+// layer's or group's only content is one inner group and paints equal to the inner
+// group's, the outer copies go. Cavalry draws each paint once, so this matches it more closely.
+export function removeDoubledPaints(json) {
+	let n = 0
+	const strip = (items) => items.map(({ nm, mn, ix, cix, ...rest }) => rest)
+	// items: a layer's shape list or a group's; returns it without doubled paints
+	const visit = (items) => {
+		if (!Array.isArray(items)) return items
+		for (const g of items) if (g && g.ty === 'gr') g.it = visit(g.it)
+		const inner = items.filter((x) => x.ty === 'gr')
+		const outerPaints = items.filter((x) => PAINT_ITEMS.includes(x.ty))
+		if (inner.length !== 1 || !outerPaints.length || items.indexOf(inner[0]) !== 0) return items
+		if (inner.length + outerPaints.length + (items.some((x) => x.ty === 'tr') ? 1 : 0) !== items.length) return items
+		const innerPaints = (inner[0].it || []).filter((x) => PAINT_ITEMS.includes(x.ty))
+		if (!deepEqual(strip(innerPaints), strip(outerPaints))) return items
+		n += outerPaints.length
+		return items.filter((x) => !outerPaints.includes(x))
+	}
+	for (const layers of layerLists(json)) for (const L of layers) if (Array.isArray(L.shapes)) L.shapes = visit(L.shapes)
+	return n
+}
+
+// Cavalry gives every path its own group with its own fill and stroke, and writes a
+// filled, stroked shape as two groups each holding the path. Neighbouring groups with the
+// same transform, holding only paths and fills/strokes, become one group when either
+//  - their paths are the same: one copy of the path takes both groups' paints, the upper
+//    group's first (a stroke group above a fill group stays a stroke over the fill), or
+//  - their fills/strokes are identical and their shapes don't overlap, so drawing them as
+//    one compound shape can't change a pixel (fill rules, see-through paint and draw
+//    order only matter where shapes overlap).
+export function mergeShapeGroups(json) {
+	let n = 0
+	const style = (g) => {
+		if (g.ty !== 'gr' || g.hd || g.bm || !Array.isArray(g.it)) return null
+		const paths = g.it.filter(isPathItem)
+		const paints = g.it.filter((x) => PAINT_ITEMS.includes(x.ty))
+		const tr = g.it.find((x) => x.ty === 'tr')
+		if (!paths.length || !paints.length || paths.length + paints.length + (tr ? 1 : 0) !== g.it.length) return null
+		// every path must come before every paint (paints apply to the paths above them)
+		const lastPath = Math.max(...paths.map((x) => g.it.indexOf(x)))
+		if (paints.some((x) => g.it.indexOf(x) < lastPath)) return null
+		if (paths.some((x) => x.hd) || paints.some((x) => x.hd || x.d)) return null // dashes restart per path
+		return { paths, paints, tr, box: itemsBounds(g.it) }
+	}
+	const strip = (items) => items.map(({ nm, mn, ix, cix, ...rest }) => rest)
+	const stripDeep = (items) => items.map(({ nm, mn, ix, cix, np, ...rest }) => (rest.it ? Object.assign(rest, { it: stripDeep(rest.it) }) : rest))
+	const overlaps = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+	const visit = (items) => {
+		if (!Array.isArray(items)) return
+		for (const it of items) if (it && it.ty === 'gr') visit(it.it)
+		for (let i = 0; i < items.length - 1; ) {
+			const a = style(items[i]), b = a && style(items[i + 1])
+			const sameTr = b && deepEqual(a.tr ? strip([a.tr]) : null, b.tr ? strip([b.tr]) : null)
+			const samePaths = sameTr && deepEqual(stripDeep(a.paths), stripDeep(b.paths))
+			const sharePaint = sameTr && !samePaths && a.box && b.box && !overlaps(a.box, b.box) && deepEqual(strip(a.paints), strip(b.paints))
+			if (!samePaths && !sharePaint) {
+				i++
+				continue
+			}
+			const g = items[i]
+			g.it = samePaths ? a.paths.concat(a.paints, b.paints, a.tr ? [a.tr] : []) : a.paths.concat(b.paths, a.paints, a.tr ? [a.tr] : [])
+			items.splice(i + 1, 1)
+			n++ // stay on i: the merged group may take the next one too
+		}
+	}
+	for (const layers of layerLists(json)) for (const L of layers) visit(L.shapes)
+	return n
+}
+
 // ---------- catalogue + runner ----------
 
 // group: lossless | lossy | assets | output. Order here is the order passes run in: lossy
@@ -1289,7 +1477,10 @@ export const PASSES = [
 	{ id: 'simplifyPaths', label: 'Simplify still paths', group: 'lossy', on: true, run: simplifyPaths },
 	{ id: 'roundPrecision', label: 'Round values (decimals per kind)', group: 'lossy', on: true, run: roundPrecision },
 	{ id: 'instanceLayers', label: 'Share identical layers as one precomp', group: 'lossless', on: true, run: instanceLayers },
+	{ id: 'removeDoubledPaints', label: 'Remove doubled fills and strokes', group: 'lossless', on: true, run: removeDoubledPaints },
+	{ id: 'mergeShapeLayers', label: 'Merge neighbouring shape layers', group: 'lossless', on: true, run: mergeShapeLayers },
 	{ id: 'flattenShapeGroups', label: 'Flatten nested shape groups', group: 'lossless', on: true, run: flattenShapeGroups },
+	{ id: 'mergeShapeGroups', label: 'Share fills and strokes between shapes', group: 'lossless', on: true, run: mergeShapeGroups },
 	{ id: 'collapseStatic', label: 'Make unchanging animated properties static', group: 'lossless', on: true, run: collapseStatic },
 	{ id: 'removeRedundantKeys', label: 'Remove keys that change nothing', group: 'lossless', on: true, run: removeRedundantKeys },
 	{ id: 'trimKeyframeFields', label: 'Drop unused keyframe fields', group: 'lossless', on: true, run: trimKeyframeFields },

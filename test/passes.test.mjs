@@ -398,3 +398,45 @@ test('simplifyPaths: a circle drawn with 16 points refits to fewer, staying on t
 	P.simplifyPaths({ layers: [layer({ shapes: [{ ty: 'sh', ks }] })] })
 	assert.ok(ks.k.v.length <= 6, ks.k.v.length + ' points')
 })
+
+// ---------- structure ----------
+
+const tri = (x) => ({ c: true, v: [[x, 0], [x + 10, 0], [x + 5, 8]], i: [[0, 0], [0, 0], [0, 0]], o: [[0, 0], [0, 0], [0, 0]] })
+const idTr = () => ({ ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 } })
+const fill = (o = 100) => ({ ty: 'fl', c: { a: 0, k: [1, 0, 0, 1] }, o: { a: 0, k: o } })
+
+test('removeDoubledPaints: the outer copy of a paint Cavalry writes twice goes', () => {
+	// Cavalry writes an editable path as gr{gr{path, fill}, fill}: painted twice in Lottie
+	const shapes = [{ ty: 'gr', it: [{ ty: 'gr', it: [{ ty: 'sh', ks: { a: 0, k: tri(0) } }, fill(50), idTr()] }, fill(50), idTr()] }]
+	const j = { layers: [layer({ shapes })] }
+	assert.equal(P.removeDoubledPaints(j), 1)
+	assert.deepEqual(j.layers[0].shapes[0].it.map((x) => x.ty), ['gr', 'tr'])
+	// a different outer paint is a real second paint and stays
+	const other = [{ ty: 'gr', it: [{ ty: 'gr', it: [{ ty: 'sh', ks: { a: 0, k: tri(0) } }, fill(50), idTr()] }, fill(20), idTr()] }]
+	assert.equal(P.removeDoubledPaints({ layers: [layer({ shapes: other })] }), 0)
+})
+
+test('mergeShapeLayers: neighbouring shape layers become groups of one layer, transforms kept', () => {
+	const mk = (ind, x, extra = {}) => layer({ ind, nm: 'L' + ind, ks: { p: { a: 0, k: [x, 5, 0] }, a: { a: 0, k: [0, 0, 0] }, s: { a: 0, k: [100, 100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 } }, shapes: [{ ty: 'sh', ks: { a: 0, k: tri(0) } }, fill()], ...extra })
+	const j = { layers: [mk(1, 10), mk(2, 20), mk(3, 30, { tt: 1 }), mk(4, 40), mk(5, 50, { parent: 4 })] }
+	assert.equal(P.mergeShapeLayers(j), 1) // 1+2 merge; 3 has a matte, 4 is a parent, 5's parent differs
+	const m = j.layers[0]
+	assert.equal(j.layers.length, 4)
+	assert.deepEqual(m.shapes.map((g) => g.nm), ['L1', 'L2'])
+	assert.deepEqual(m.shapes[1].it.find((x) => x.ty === 'tr').p.k, [20, 5])
+	// see-through layers with several paints keep their own layer (overlaps would change)
+	const seeThrough = (ind) => mk(ind, 0, { ks: { o: { a: 0, k: 50 } }, shapes: [{ ty: 'sh', ks: { a: 0, k: tri(0) } }, fill(), { ty: 'st', w: { a: 0, k: 2 }, c: { a: 0, k: [0, 0, 0, 1] }, o: { a: 0, k: 100 } }] })
+	assert.equal(P.mergeShapeLayers({ layers: [seeThrough(1), seeThrough(2)] }), 0)
+})
+
+test('mergeShapeGroups: same path twice takes both paints; matching paints share when shapes are apart', () => {
+	const g = (x, paint) => ({ ty: 'gr', it: [{ ty: 'sh', ks: { a: 0, k: tri(x) } }, paint, idTr()] })
+	const stroke = { ty: 'st', w: { a: 0, k: 2 }, c: { a: 0, k: [0, 0, 0, 1] }, o: { a: 0, k: 100 } }
+	const same = { layers: [layer({ shapes: [g(0, stroke), g(0, fill())] })] }
+	assert.equal(P.mergeShapeGroups(same), 1)
+	assert.deepEqual(same.layers[0].shapes[0].it.map((x) => x.ty), ['sh', 'st', 'fl', 'tr']) // stroke stays over fill
+	const apart = { layers: [layer({ shapes: [g(0, fill()), g(100, fill())] })] }
+	assert.equal(P.mergeShapeGroups(apart), 1)
+	const touching = { layers: [layer({ shapes: [g(0, fill()), g(5, fill())] })] }
+	assert.equal(P.mergeShapeGroups(touching), 0)
+})

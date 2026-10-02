@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- Optimiser: "Remove doubled fills and strokes" fixes Cavalry writing every path's paint twice (see-through colours rendered too strong); matches Cavalry exactly and saves a fifth of a typical file.
+- Optimiser: "Merge neighbouring shape layers" and "Share fills and strokes between shapes" restructure Cavalry's one-layer-per-shape output the way After Effects files are built; lossless.
 - Optimiser: baked keyframes are replaced with a few fitted, eased keys (checked every half frame); path morphs fit with one shared ease and curved motion becomes motion paths.
 - Optimiser: "Simplify still paths" removes points that don't change an outline, refitting curves either side.
 - Optimiser: baked squash and stretch is recovered as non-uniform scale, as well as move, turn and scale.

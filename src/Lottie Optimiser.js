@@ -65,6 +65,9 @@ var TIPS = {
 	removeDeadLayers: ['Layers that are never on screen: fully transparent the whole time, or outside the timeline.', 'Leaves out layers you never see'],
 	flattenShapeGroups: ['Cavalry wraps every shape in several empty groups. This unwraps groups that do nothing, so the shape looks exactly the same.', 'Unwraps empty shape groups'],
 	foldStaticParents: ['Cavalry writes every group as its own layer. Groups that don’t move or draw anything are merged into their children, which often halves the file.', 'Merges still groups into their children'],
+	removeDoubledPaints: ['Cavalry writes the fill and stroke of every path shape twice, so players paint it twice: see-through colours come out stronger than in Cavalry and edges darker. Keeps one copy, which matches Cavalry exactly.', 'Matches Cavalry, much smaller'],
+	mergeShapeLayers: ['Cavalry writes every shape as its own layer; After Effects files hold many shapes in one. Neighbouring shapes with the same parent and timing become groups in one layer. Nothing changes on screen.', 'Many layers → one layer of groups'],
+	mergeShapeGroups: ['A filled and stroked path is written as two copies of the path; this keeps one with both. Shapes with the same fill or stroke that don’t touch also share it.', 'One path, shared fills and strokes'],
 	removeIdentityNulls: ['Removes empty nulls that don’t move anything. Cavalry adds one per comp.', 'Removes nulls that do nothing'],
 	removeUnusedAssets: ['Removes images and comps that no layer uses.', 'Removes unused images and comps'],
 	dedupeAssets: ['When the same image or comp is in the file twice, keeps one copy.', 'Keeps one copy of duplicates'],
@@ -253,7 +256,7 @@ function checkFile() {
 	var path = api.presentOpenFile(api.getProjectPath() || api.getDesktopFolder(), 'Check Lottie', 'Lottie JSON (*.json)')
 	if (!path) return
 	var issues = checkLottie(JSON.parse(api.readFromFile(path)), settings.targets)
-	status.setText(summary(issues, showResults(issues, api.getFileNameFromPath(path))))
+	status.setText(summary(issues, showResults(issues, api.getFileNameFromPath(path, true))))
 }
 
 // ---------- export page ----------
@@ -353,8 +356,8 @@ function optimiseAndWrite(json, out, extra, dirs) {
 	var r = result.report
 	var issues = checkLottie(result.json, settings.targets)
 	var lines = (extra || []).concat([
-		kb(r[0].bytes) + ' → ' + kb(r[r.length - 1].bytes) + ' (' + Math.round(100 - (100 * r[r.length - 1].bytes) / r[0].bytes) + '% smaller) · saved ' + api.getFileNameFromPath(out),
-		summary(issues, showResults(issues, api.getFileNameFromPath(out))),
+		kb(r[0].bytes) + ' → ' + kb(r[r.length - 1].bytes) + ' (' + Math.round(100 - (100 * r[r.length - 1].bytes) / r[0].bytes) + '% smaller) · saved ' + api.getFileNameFromPath(out, true),
+		summary(issues, showResults(issues, api.getFileNameFromPath(out, true))),
 	])
 	status.setText(lines.join('\n'))
 	var changed = r.filter(function (x) {

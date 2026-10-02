@@ -47,7 +47,7 @@ export function packImages(json, dirs, outDir, opts) {
 			a.e = 1
 			res.embedded++
 		} else {
-			var name = api.getFileNameFromPath(file)
+			var name = api.getFileNameFromPath(file, true)
 			var target = outDir + '/images/' + name
 			if (target !== file) {
 				if (api.filePathExists(target)) api.deleteFilePath(target)
