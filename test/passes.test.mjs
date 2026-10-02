@@ -225,3 +225,21 @@ test('roundPrecision: decimals by kind of value', () => {
 	assert.equal(j.layers[0].ks.o.k, 55.6)
 	assert.deepEqual(j.layers[0].shapes[0].c.k, [0.123, 0.5, 0.5, 1])
 })
+
+test('instanceLayers: identical shape layers share one precomp; anchor shifts by the pad', () => {
+	const shapes = [{ ty: 'gr', it: [{ ty: 'rc', s: { a: 0, k: [10, 10] }, p: { a: 0, k: [0, 0] }, nm: 'x'.repeat(1200) }] }]
+	const copy = (ind, x) => layer({ ind, nm: 'Coin', bm: 1, shapes: JSON.parse(JSON.stringify(shapes)), ks: { p: { a: 0, k: [x, 50, 0] }, a: { a: 0, k: [5, 5, 0] } } })
+	const j = { w: 100, h: 100, layers: [copy(1, 10), copy(2, 60), copy(3, 90), layer({ ind: 4, parent: 3 })] }
+	assert.equal(P.instanceLayers(j), 1) // 1 and 2 share; 3 is a parent so it stays
+	const [a, b, c] = j.layers
+	assert.equal(a.ty, 0); assert.equal(a.refId, b.refId); assert.equal(c.ty, 4)
+	assert.equal(a.bm, 1)
+	const pad = 2000
+	assert.deepEqual(a.ks.a.k, [5 + pad, 5 + pad, 0])
+	assert.deepEqual(a.ks.p.k, [10, 50, 0])
+	assert.equal(a.w, 2 * pad)
+	const inner = j.assets[0].layers[0]
+	assert.deepEqual(inner.ks.p.k, [pad, pad, 0])
+	assert.deepEqual(inner.shapes, shapes)
+	assert.equal(inner.bm, undefined, 'blend stays on the outer layer')
+})

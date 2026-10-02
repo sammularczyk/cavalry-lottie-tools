@@ -52,6 +52,7 @@ var TIPS = {
 	removeUnusedAssets: ['Images and precomps no layer refers to.', 'Nothing refers to them'],
 	dedupeAssets: ['Identical precomps or images become one asset.', 'Identical precomps and images'],
 	trimToLayerRange: ['Keyframes outside each layer’s in/out range, keeping one on each side.', 'Keys outside each layer’s range'],
+	instanceLayers: ['Layers with identical content are written once as a precomp and reused. Cavalry writes every duplicate and comp reference out in full; After Effects exports share precomps.', 'Duplicate layers → one shared precomp'],
 	collapseStatic: ['Animated properties whose keys all hold the same value.', 'Keys that all hold one value'],
 	removeRedundantKeys: ['Keys inside a constant run, or exactly on a straight line.', 'Keys that change nothing'],
 	trimKeyframeFields: ['Tangents on hold and last keys, legacy end values; linear eases written short.', 'Unused tangents and end values'],
@@ -227,7 +228,8 @@ var opts = list(260, T)
 ;['lossless', 'lossy'].forEach(function (group) {
 	opts.layout.add(label(group === 'lossy' ? 'Lossy · within a fraction of a pixel' : 'Lossless', 10, T.muted))
 	PASSES.forEach(function (p) {
-		if (p.group === group) opts.layout.add(optionRow(p.id, p.label, TIPS[p.id][0], TIPS[p.id][1]))
+		var tip = TIPS[p.id] || [p.label, '']
+		if (p.group === group) opts.layout.add(optionRow(p.id, p.label, tip[0], tip[1]))
 	})
 })
 opts.layout.add(label('Output', 10, T.muted))

@@ -685,6 +685,80 @@ export function roundPrecision(json, opts = {}) {
 	return n
 }
 
+// Shape layers with identical content become one precomp used several times. Cavalry
+// writes every duplicate (and every comp reference) out in full; After Effects exports
+// share a precomp. The precomp is drawn offset by `pad` so content left or above the
+// origin isn't clipped by the precomp's bounds, and the anchor moves by the same amount.
+// ponytail: exact duplicates only; copies one frame apart (re-baked) aren't matched.
+export function instanceLayers(json, opts = {}) {
+	const minBytes = opts.minBytes != null ? opts.minBytes : 1000
+	const pad = 2 * Math.max(json.w || 0, json.h || 0, 1000)
+	let n = 0,
+		next = 0
+	const ids = new Set((json.assets || []).map((a) => a.id))
+	const newId = () => {
+		let id
+		do id = 'inst_' + next++
+		while (ids.has(id))
+		ids.add(id)
+		return id
+	}
+	for (const layers of layerLists(json)) {
+		const parents = new Set(layers.map((L) => L.parent).filter((v) => v != null))
+		const groups = new Map()
+		layers.forEach((L, i) => {
+			if (L.ty !== 4 || L.tt || L.td || L.tp != null || L.ddd === 1 || L.ao === 1 || parents.has(L.ind)) return
+			if ((L.masksProperties && L.masksProperties.length) || (L.ef && L.ef.length)) return
+			const key = JSON.stringify({ shapes: L.shapes, ip: L.ip, op: L.op, st: L.st, sr: L.sr })
+			if (key.length < minBytes || key.indexOf('"x":"') >= 0) return
+			if (!groups.has(key)) groups.set(key, [])
+			groups.get(key).push(i)
+		})
+		for (const idx of groups.values()) {
+			if (idx.length < 2) continue
+			const first = layers[idx[0]]
+			const id = newId()
+			const inner = {
+				ty: 4,
+				ind: 1,
+				nm: first.nm,
+				ip: first.ip,
+				op: first.op,
+				st: first.st || 0,
+				sr: first.sr || 1,
+				ks: { p: { a: 0, k: [pad, pad, 0] } },
+				shapes: first.shapes,
+			}
+			json.assets = json.assets || []
+			json.assets.push({ id, nm: first.nm, layers: [inner] })
+			for (const i of idx) {
+				const L = layers[i]
+				const ks = Object.assign({}, L.ks)
+				ks.a = shiftAnchor(ks.a, pad)
+				const outer = { ty: 0, refId: id, w: 2 * pad, h: 2 * pad, ind: L.ind, ip: L.ip, op: L.op, st: 0, sr: 1, ks }
+				for (const f of ['nm', 'parent', 'bm', 'hd']) if (L[f] !== undefined) outer[f] = L[f]
+				layers[i] = outer
+			}
+			n += idx.length - 1
+		}
+	}
+	return n
+}
+
+function shiftAnchor(a, pad) {
+	const add = (v) => {
+		const out = asArray(v).slice()
+		out[0] = (out[0] || 0) + pad
+		out[1] = (out[1] || 0) + pad
+		return out
+	}
+	if (!a) return { a: 0, k: [pad, pad, 0] }
+	if (!isAnimated(a)) return Object.assign({}, a, { k: add(a.k) })
+	return Object.assign({}, a, {
+		k: a.k.map((kf) => Object.assign({}, kf, kf.s ? { s: add(kf.s) } : {}, kf.e ? { e: add(kf.e) } : {})),
+	})
+}
+
 // ---------- serialising ----------
 
 // Shortest text for a number. With `exponent`, 0.000001 -> 1e-6 and 12300000 -> 123e5.
@@ -742,6 +816,7 @@ export const PASSES = [
 	{ id: 'recoverRigidMotion', label: 'Turn baked moving shapes back into transforms', group: 'lossy', on: true, run: recoverRigidMotion },
 	{ id: 'simplifyKeys', label: 'Simplify keyframes within tolerance', group: 'lossy', on: true, run: simplifyKeys },
 	{ id: 'roundPrecision', label: 'Round values (decimals per kind)', group: 'lossy', on: true, run: roundPrecision },
+	{ id: 'instanceLayers', label: 'Share identical layers as one precomp', group: 'lossless', on: true, run: instanceLayers },
 	{ id: 'collapseStatic', label: 'Make unchanging animated properties static', group: 'lossless', on: true, run: collapseStatic },
 	{ id: 'removeRedundantKeys', label: 'Remove keys that change nothing', group: 'lossless', on: true, run: removeRedundantKeys },
 	{ id: 'trimKeyframeFields', label: 'Drop unused keyframe fields', group: 'lossless', on: true, run: trimKeyframeFields },

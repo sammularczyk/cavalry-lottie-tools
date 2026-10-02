@@ -7,13 +7,25 @@ const pairs = files.map(f => { const j = JSON.parse(fs.readFileSync(f,'utf8')); 
 const html = `<!doctype html><meta charset=utf-8><body style="background:#fff"><pre id=log>running</pre>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
 <script>
+const RENDERER = new URLSearchParams(location.search).get('r') || 'canvas';
 
 async function render(data, frames) {
-  const div = document.createElement('div'); div.style.width = '200px'; div.style.height = '200px'; document.body.appendChild(div)
-  const anim = lottie.loadAnimation({ container: div, renderer: 'canvas', loop: false, autoplay: false, animationData: data, rendererSettings: { clearCanvas: true } })
+  const div = document.createElement('div'); div.style.width = '600px'; div.style.height = '300px'; document.body.appendChild(div)
+  const anim = lottie.loadAnimation({ container: div, renderer: RENDERER, loop: false, autoplay: false, animationData: data, rendererSettings: { clearCanvas: true } })
   await new Promise(r => anim.isLoaded ? r() : anim.addEventListener('DOMLoaded', r))
-  const c = div.querySelector('canvas'); const out = []
-  for (const f of frames) { anim.goToAndStop(f, true); out.push(c.getContext('2d').getImageData(0,0,c.width,c.height).data) }
+  const out = []
+  for (const f of frames) {
+    anim.goToAndStop(f, true)
+    let c = div.querySelector('canvas')
+    if (!c) { // svg: rasterise it the way a browser would draw it
+      const img = new Image()
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(div.querySelector('svg')))
+      await img.decode()
+      c = document.createElement('canvas'); c.width = 600; c.height = 300
+      c.getContext('2d').drawImage(img, 0, 0, 600, 300)
+    }
+    out.push(c.getContext('2d').getImageData(0,0,c.width,c.height).data)
+  }
   anim.destroy(); div.remove(); return out
 }
 (async () => {
