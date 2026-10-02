@@ -320,6 +320,69 @@ export function trimKeyframeFields(json) {
 	return n
 }
 
+// Fields equal to what every player assumes when they are missing: zero skew (and its
+// axis), auto-orient off, empty names/match names, an empty glyph list.
+export function removeDefaults(json) {
+	let n = 0
+	const zero = (p) => p && !isAnimated(p) && !p.x && Number(asArray(p.k)[0]) === 0
+	const walk = (node) => {
+		if (Array.isArray(node)) return node.forEach(walk)
+		if (!isObj(node)) return
+		if (zero(node.sk) && (!node.sa || zero(node.sa))) {
+			delete node.sk
+			delete node.sa
+			n++
+		}
+		if (node.ao === 0) (delete node.ao, n++)
+		for (const k of ['nm', 'mn']) if (node[k] === '') (delete node[k], n++)
+		for (const k in node) if (!isProp(node[k])) walk(node[k])
+	}
+	walk(json.layers)
+	for (const a of json.assets || []) walk(a.layers)
+	if (Array.isArray(json.chars) && !json.chars.length) (delete json.chars, n++)
+	return n
+}
+
+const isIdentity = (ks) => {
+	if (!ks) return true
+	const val = (p, d) => (p ? (!isAnimated(p) && !p.x ? asArray(p.k) : null) : asArray(d))
+	const same = (v, ref) => v && ref.every((r, i) => Math.abs((v[i] != null ? v[i] : r) - r) < EPS)
+	let pos
+	if (ks.p && ks.p.s) pos = [val(ks.p.x, 0), val(ks.p.y, 0)].every((v) => same(v, [0]))
+	else pos = same(val(ks.p, [0, 0, 0]), [0, 0, 0])
+	return (
+		pos &&
+		same(val(ks.a, [0, 0, 0]), [0, 0, 0]) &&
+		same(val(ks.s, [100, 100, 100]), [100, 100, 100]) &&
+		same(val(ks.r, [0]), [0]) &&
+		same(val(ks.sk, [0]), [0]) &&
+		!ks.rx && !ks.ry && !ks.rz && !ks.or
+	)
+}
+
+// Null layers whose transform is the identity (Cavalry wraps every comp in one) add
+// nothing: their children are re-parented to the null's own parent and the null goes.
+export function removeIdentityNulls(json) {
+	let n = 0
+	for (const layers of layerLists(json)) {
+		for (let i = layers.length - 1; i >= 0; i--) {
+			const L = layers[i]
+			if (L.ty !== 3 || L.ind == null || !isIdentity(L.ks)) continue
+			if (layers.some((o) => o.tp === L.ind)) continue
+			const up = layers.find((o) => o.ind === L.parent)
+			if (L.parent != null && !up) continue // dangling parent: leave it alone
+			for (const o of layers) {
+				if (o.parent !== L.ind) continue
+				if (L.parent != null) o.parent = L.parent
+				else delete o.parent
+			}
+			layers.splice(i, 1)
+			n++
+		}
+	}
+	return n
+}
+
 // Names that expressions look up ("thisComp.layer('Name')", effect('Slider'), ...).
 function namesUsedByExpressions(json) {
 	const names = new Set()
@@ -414,12 +477,14 @@ export function serialise(json, { pretty = false, exponent = false } = {}) {
 export const PASSES = [
 	{ id: 'removeHidden', label: 'Remove hidden layers and shapes', group: 'lossless', on: true, run: removeHidden },
 	{ id: 'removeDeadLayers', label: 'Remove layers that are never visible', group: 'lossless', on: true, run: removeDeadLayers },
+	{ id: 'removeIdentityNulls', label: 'Remove do-nothing null layers', group: 'lossless', on: true, run: removeIdentityNulls },
 	{ id: 'removeUnusedAssets', label: 'Remove unused assets', group: 'lossless', on: true, run: removeUnusedAssets },
 	{ id: 'dedupeAssets', label: 'Merge identical assets', group: 'lossless', on: true, run: dedupeAssets },
 	{ id: 'trimToLayerRange', label: 'Trim keys outside each layer’s time range', group: 'lossless', on: true, run: trimToLayerRange },
 	{ id: 'collapseStatic', label: 'Make unchanging animated properties static', group: 'lossless', on: true, run: collapseStatic },
 	{ id: 'removeRedundantKeys', label: 'Remove keys that change nothing', group: 'lossless', on: true, run: removeRedundantKeys },
 	{ id: 'trimKeyframeFields', label: 'Drop unused keyframe fields', group: 'lossless', on: true, run: trimKeyframeFields },
+	{ id: 'removeDefaults', label: 'Drop default-valued fields', group: 'lossless', on: true, run: removeDefaults },
 	{ id: 'unwrapScalars', label: 'Unwrap one-value arrays', group: 'lossless', on: true, run: unwrapScalars },
 	{ id: 'stripMeta', label: 'Strip metadata', group: 'lossless', on: true, run: stripMeta, options: { names: false, matchNames: true, markers: false, keepEffectMatchNames: false } },
 ]

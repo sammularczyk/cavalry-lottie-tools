@@ -121,6 +121,30 @@ test('stripMeta keeps names expressions use', () => {
 	assert.equal(j.meta, undefined)
 })
 
+test('removeIdentityNulls re-parents children; keeps moving nulls', () => {
+	const id = { p: { a: 0, k: [0, 0, 0] }, a: { a: 0, k: [0, 0, 0] }, s: { a: 0, k: [100, 100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 }, sk: { a: 0, k: 0 }, sa: { a: 0, k: 0 } }
+	const moving = { ...id, r: { a: 1, k: [kf(0, [0], lin), kf(9, [90])] } }
+	const j = {
+		layers: [
+			layer({ ind: 1, ty: 3, ks: moving }),
+			layer({ ind: 2, ty: 3, parent: 1, ks: id }),
+			layer({ ind: 3, parent: 2 }),
+			layer({ ind: 4, ty: 3, ks: { p: { s: true, x: { a: 0, k: 0 }, y: { a: 0, k: 0 } } } }),
+			layer({ ind: 5, parent: 4 }),
+		],
+	}
+	assert.equal(P.removeIdentityNulls(j), 2)
+	assert.deepEqual(j.layers.map((L) => [L.ind, L.parent]), [[1, undefined], [3, 1], [5, undefined]])
+})
+
+test('removeDefaults drops zero skew, ao 0 and empty names', () => {
+	const j = { chars: [], layers: [layer({ ao: 0, nm: '', mn: '', ks: { sk: { a: 0, k: 0 }, sa: { a: 0, k: 0 } }, shapes: [{ ty: 'tr', nm: '', sk: { a: 0, k: 5 }, sa: { a: 0, k: 0 } }] })] }
+	P.removeDefaults(j)
+	const L = j.layers[0]
+	assert.equal(L.ao, undefined); assert.equal(L.nm, undefined); assert.equal(L.ks.sk, undefined); assert.equal(j.chars, undefined)
+	assert.ok(L.shapes[0].sk, 'non-zero skew stays')
+})
+
 test('formatNumber / serialise round-trip exactly', () => {
 	assert.equal(P.formatNumber(0.000001, true), '1e-6')
 	assert.equal(P.formatNumber(-0.0000125, true), '-125e-7')
