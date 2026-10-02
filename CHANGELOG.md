@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- Exporter: track mattes that a mask can't stand in for (stroked sources, luma, alpha) export as real Lottie track mattes: the source (shown briefly for the export if hidden) becomes a matte precomp above each layer it clips.
+- Exporter: a group's in/out frames now limit its children, as in Cavalry (Lottie parenting doesn't).
 - Exporter: geometry track mattes (Stencil / Silhouette) become Lottie add / subtract masks from the matte's shapes, sampled from the scene; luma/alpha mattes are reported.
 - Optimiser: paths whose point count changes between keys are padded to one count and held where it changes; lottie-web otherwise corrupts its path buffers and blanks other layers.
 - Optimiser: keys and layers never on screen go: each comp's visible frames are worked out through precomp time offsets, stretch and time remapping (nested too), and parents keep keys while any child is visible.

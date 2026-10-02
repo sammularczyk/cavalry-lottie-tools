@@ -551,22 +551,21 @@ function sceneMasks(id) {
 		.filter(Boolean)
 }
 
-// Track mattes Cavalry's writer drops. Geometry mattes clip to the matte's shapes, which
-// is what a mask does: Stencil -> add (mode 0), Silhouette -> subtract (mode 1). Luma and
-// alpha mattes depend on pixels, so they're only counted (out.pixel).
+// Track mattes Cavalry's writer drops. A geometry matte (Stencil / Silhouette) whose
+// source is only filled shapes clips to those shapes, which is what a mask does: Stencil
+// -> add (mode 0), Silhouette -> subtract (mode 1). Every other matte (strokes, luma,
+// alpha) becomes a Lottie track matte instead (planMattes / buildTrackMattes).
 // ponytail: a layer with both masks and mattes gets their union, not their intersection.
-function sceneMattes(id, out) {
-	const conns = api.getInConnectedAttributes(id).filter((a) => /^trackMattes\.\d+\.id$/.test(a))
-	if (!conns.length) return []
+const MATTE_TT = { 0: 1, 1: 2, 2: 3, 3: 4, 4: 1, 5: 2 } // Cavalry matteMode -> Lottie tt
+
+function matteConns(id) {
 	let mode = 0
 	try {
 		mode = api.get(id, 'matteMode')
 	} catch (e) {}
-	if (mode !== 0 && mode !== 1) {
-		out.pixel += conns.length
-		return []
-	}
-	return conns
+	return api
+		.getInConnectedAttributes(id)
+		.filter((a) => /^trackMattes\.\d+\.id$/.test(a))
 		.map((a) => {
 			let on = true
 			try {
@@ -575,6 +574,36 @@ function sceneMattes(id, out) {
 			return on && { id: String(api.getInConnection(id, a)).replace(/\.id$/, ''), mode }
 		})
 		.filter(Boolean)
+}
+
+// A matte source a mask can stand in for: drawn only by filled shapes, no strokes.
+function fillOnly(src) {
+	const drawn = sourceShapes(src).filter((sh) => api.hasAttribute(sh, 'material.alpha') || api.hasAttribute(sh, 'stroke.width'))
+	return drawn.length > 0 && drawn.every((sh) => api.hasAttribute(sh, 'material.alpha') && !api.hasAttribute(sh, 'stroke.width'))
+}
+
+const asMask = (m) => (m.mode === 0 || m.mode === 1) && fillOnly(m.id)
+
+function sceneMattes(id) {
+	return matteConns(id).filter(asMask)
+}
+
+// Mattes in a comp that need a real track matte: [{target, sources, tt}], plus the hidden
+// sources (and hidden ancestors) to show while Cavalry's writer exports them.
+function planMattes(comp) {
+	const jobs = [], unhide = new Set()
+	for (const id of compLayers(comp)) {
+		const ms = matteConns(id).filter((m) => !asMask(m))
+		if (!ms.length) continue
+		jobs.push({ target: id, sources: ms.map((m) => m.id), tt: MATTE_TT[ms[0].mode] || 1 })
+		for (const m of ms)
+			for (let q = m.id, g = 0; q && q !== comp && g < 64; q = api.getParent(q), g++) {
+				try {
+					if (api.get(q, 'hidden')) unhide.add(q)
+				} catch (e) {}
+			}
+	}
+	return { jobs, unhide: [...unhide] }
 }
 
 // The shapes a mask or matte source draws: itself unless it's a group, plus its
@@ -674,13 +703,26 @@ export function exportWithPrecomps(compId, opts = {}) {
 	let pivots = 0,
 		baked = 0,
 		maskCount = 0,
+		trackMattes = 0,
 		refs = 0,
 		next = 0
 	const userComp = api.getActiveComp(),
 		userFrame = api.getFrame()
 
 	function build(comp) {
-		const out = exportComp(comp, opts)
+		const plan = planMattes(comp)
+		const shown = []
+		let out
+		try {
+			// Cavalry's writer skips hidden layers, and matte sources are usually hidden
+			for (const q of plan.unhide) {
+				api.set(q, { hidden: false })
+				shown.push(q)
+			}
+			out = exportComp(comp, opts)
+		} finally {
+			for (const q of shown) api.set(q, { hidden: true })
+		}
 		dirs.push(out.dir)
 		const exported = out.json
 		const ids = new Set(compLayers(comp))
@@ -723,6 +765,20 @@ export function exportWithPrecomps(compId, opts = {}) {
 		// last frame would vanish on it (a one-frame flash each time a precomp loops)
 		const last = api.get(comp, 'endFrame')
 		for (const L of exported.layers) if (L.op === last) L.op = last + 1
+		// Cavalry hides a group's children outside the group's in/out frames; Lottie parenting
+		// passes only the transform, so each layer is clipped to its scene ancestors' frames
+		for (const L of exported.layers) {
+			const id = sceneOf.get(L)
+			if (!id) continue
+			let from = -Infinity, to = Infinity
+			for (let p = api.getParent(id), guard = 0; p && ids.has(p) && guard < 64; p = api.getParent(p), guard++) {
+				const i = api.getInFrame(p), o = api.getOutFrame(p)
+				if (i >= 0) from = Math.max(from, i) // footage reports -1
+				if (o >= 0) to = Math.min(to, o + 1) // inclusive -> exclusive
+			}
+			if (from > L.ip) L.ip = from
+			if (to < L.op) L.op = Math.max(to, L.ip)
+		}
 		exported.layers = dropGuides(exported.layers, sceneOf)
 		staticSingleKeys(exported.layers)
 		for (const L of exported.layers) {
@@ -735,7 +791,64 @@ export function exportWithPrecomps(compId, opts = {}) {
 		}
 		inheritOpacity(exported.layers, api.get(comp, 'startFrame'), last)
 		repair(comp, exported, sceneOf)
+		buildTrackMattes(comp, exported, sceneOf, plan)
 		return exported
+	}
+
+	// Each matte becomes a precomp of its source's layers (their outside parents copied as
+	// nulls, so they stay put), referenced by a matte layer (td) directly above every
+	// drawing layer it clips, which takes the matte type (tt). Several mattes on one layer
+	// share one precomp: their union.
+	// ponytail: mixed matte modes on one layer use the first one's.
+	function buildTrackMattes(comp, exported, sceneOf, plan) {
+		if (!plan.jobs.length) return
+		const layers = exported.layers
+		const [w, h] = compSize(comp)
+		const byInd = new Map(layers.map((L) => [L.ind, L]))
+		const within = (id, src) => {
+			for (let q = id, g = 0; q && g < 64; q = api.getParent(q), g++) if (q === src) return true
+			return false
+		}
+		let ind = Math.max(0, ...layers.map((L) => L.ind || 0)) + 1
+		const used = new Set(), assetFor = new Map()
+		const kids = (L) => layers.filter((q) => q.parent === L.ind)
+		const drawing = (L) => (L.ty !== 4 ? L.ty !== 3 : /"ty":"(sh|rc|el|sr)"/.test(JSON.stringify(L.shapes || [])))
+		const under = (L) => [L].concat(...kids(L).map(under))
+		for (const job of plan.jobs) {
+			const key = job.sources.slice().sort().join('+')
+			if (!assetFor.has(key)) {
+				const own = layers.filter((L) => sceneOf.get(L) && job.sources.some((src) => within(sceneOf.get(L), src)))
+				if (!own.length) {
+					warnings.push('A track matte on ' + api.getNiceName(job.target) + ' in ' + api.getNiceName(comp) + ' had nothing to export; it shows unmatted')
+					assetFor.set(key, null)
+					continue
+				}
+				own.forEach((L) => used.add(L))
+				const copy = own.map((L) => JSON.parse(JSON.stringify(L)))
+				const have = new Set(copy.map((L) => L.ind))
+				for (let i = 0; i < copy.length; i++) {
+					const P = copy[i].parent != null && !have.has(copy[i].parent) && byInd.get(copy[i].parent)
+					if (!P) continue
+					copy.push({ ty: 3, ind: P.ind, parent: P.parent, ip: P.ip, op: P.op, st: P.st || 0, sr: 1, ks: JSON.parse(JSON.stringify(P.ks || {})) })
+					have.add(P.ind)
+				}
+				const id = 'matte_' + next++
+				assets.push({ id, nm: 'Matte', fr: exported.fr, layers: copy })
+				assetFor.set(key, id)
+			}
+			const refId = assetFor.get(key)
+			if (!refId) continue
+			for (const T of layers.filter((L) => sceneOf.get(L) === job.target))
+				for (const D of under(T).filter(drawing)) {
+					if (D.tt || used.has(D)) continue
+					layers.splice(layers.indexOf(D), 0, { ty: 0, ind: ind++, nm: 'Matte', refId, td: 1, ip: D.ip, op: D.op, st: 0, sr: 1, w, h, ks: {} })
+					D.tt = job.tt
+					trackMattes++
+				}
+		}
+		// sources that were hidden were only exported for their mattes
+		const hiddenSrc = (L) => plan.unhide.some((q) => within(sceneOf.get(L), q))
+		exported.layers = layers.filter((L) => !used.has(L) || !hiddenSrc(L) || layers.some((q) => q.parent === L.ind && !used.has(q)))
 	}
 
 	// Check every layer's anchor against the scene and correct or bake its position.
@@ -764,12 +877,10 @@ export function exportWithPrecomps(compId, opts = {}) {
 			baked += res.varying.length
 		}
 		// after positions are final: masks the writer dropped, sample their shapes every frame, rebuild on the drawing layers
-		const mattes = { pixel: 0 }
 		const masked = exported.layers
 			.filter((L) => sceneOf.get(L) && !L.masksProperties)
-			.map((L) => [L, sceneMasks(sceneOf.get(L)).concat(sceneMattes(sceneOf.get(L), mattes))])
+			.map((L) => [L, sceneMasks(sceneOf.get(L)).concat(sceneMattes(sceneOf.get(L)))])
 			.filter((x) => x[1].length)
-		if (mattes.pixel) warnings.push(mattes.pixel + ' luma/alpha track matte(s) in ' + api.getNiceName(comp) + ' can’t be exported; those layers show unmatted')
 		if (masked.length) {
 			const every = []
 			for (let f = start; f <= end; f++) every.push(f)
@@ -805,5 +916,5 @@ export function exportWithPrecomps(compId, opts = {}) {
 		api.setFrame(userFrame)
 	}
 	json.assets = (json.assets || []).concat(assets)
-	return { json, dirs, warnings, precomps: assets.length, refs, pivots, baked, masks: maskCount }
+	return { json, dirs, warnings, precomps: assets.length, refs, pivots, baked, masks: maskCount, trackMattes }
 }

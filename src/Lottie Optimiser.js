@@ -219,7 +219,8 @@ function exportSelected() {
 	var r = exportWithPrecomps(selectedComp(), opts)
 	var note = r.refs ? r.refs + ' comp reference(s) → ' + r.precomps + ' precomp(s)' : ''
 	if (r.pivots || r.baked) note += (note ? ' · ' : '') + (r.pivots + r.baked) + ' position(s) corrected'
-	if (r.masks) note += (note ? ' · ' : '') + r.masks + ' mask(s) and matte(s) rebuilt'
+	if (r.masks) note += (note ? ' · ' : '') + r.masks + ' mask(s) rebuilt'
+	if (r.trackMattes) note += (note ? ' · ' : '') + r.trackMattes + ' track matte(s)'
 	if (r.warnings && r.warnings.length) note += (note ? '\n' : '') + '⚠ ' + r.warnings.join('\n⚠ ')
 	return { json: r.json, dirs: r.dirs, note: note }
 }
