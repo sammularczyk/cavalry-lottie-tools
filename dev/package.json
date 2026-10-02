@@ -6,7 +6,7 @@
 	"private": true,
 	"scripts": {
 		"dev": "cross-env NODE_ENV=development npx bundler",
-		"release": "cross-env NODE_ENV=production npx bundler",
+		"release": "cross-env NODE_ENV=production npx bundler && cp build/*.jsc ../",
 		"test": "node --test test/*.test.mjs"
 	},
 	"devDependencies": {
