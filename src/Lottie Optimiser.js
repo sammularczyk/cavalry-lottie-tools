@@ -3,11 +3,12 @@
 // Export: exports a comp with Cavalry's own Lottie writer, then optimises the JSON with
 // selectable passes. Also optimises any existing Lottie file.
 
-import { PASSES, optimise } from './modules/passes.js'
+import { PASSES, optimise, serialise } from './modules/passes.js'
 import { PLAYERS, checkLottie, describePlayers } from './modules/players.js'
 import { theme, label, section, button, row, toggleRow, list, tabStrip } from './modules/ui/kit.js'
 import { checkForUpdate } from './modules/updateChecker.js'
-import { exportComp, copyImages, BAKE_MODES } from './modules/cavalryExport.js'
+import { exportComp, BAKE_MODES } from './modules/cavalryExport.js'
+import { packImages } from './modules/images.js'
 import { exportWithPrecomps } from './modules/precomps.js'
 
 var GITHUB_REPO = 'phillip-motion/cavalry-lottie-tools' // ponytail: confirm owner before first release
@@ -17,7 +18,7 @@ var PREF_KEY = 'lottieTools_exporter' // old key kept so saved settings carry ov
 // ---------- settings ----------
 
 function defaults() {
-	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, precomps: true, bakeMode: 0, tab: 0, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
+	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, precomps: true, bakeMode: 0, tab: 0, accuracy: 1, display: 0, embedImages: true, jpegImages: false, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
 	PASSES.forEach(function (p) {
 		s[p.id] = p.on
 	})
@@ -45,6 +46,19 @@ function save() {
 var T = theme()
 var FATAL = '#e5534b'
 
+// The most anything may move, in pixels at the size the animation plays at.
+var ACCURACY = [
+	{ label: 'Exact (0.05 px)', px: 0.05 },
+	{ label: 'Balanced (¼ px)', px: 0.25 },
+	{ label: 'Small file (½ px)', px: 0.5 },
+	{ label: 'Smallest (1 px)', px: 1 },
+]
+var DISPLAY = [
+	{ label: 'Full size', scale: 1 },
+	{ label: 'Half size', scale: 0.5 },
+	{ label: 'Quarter size', scale: 0.25 },
+]
+
 // Tooltip (long) and row detail (one short line) per pass.
 var TIPS = {
 	removeHidden: ['Anything you hid in Cavalry is left out. Layers other layers depend on (parents, mattes) are kept.', 'Leaves out hidden layers'],
@@ -64,8 +78,30 @@ var TIPS = {
 	stripMeta: ['Removes notes and labels that only After Effects or Cavalry use.', 'Removes editor-only notes'],
 	holdJumps: ['Phones and 120 Hz screens draw frames in between yours. A value that snaps from one frame to the next would slide; this keeps it a snap, as in Cavalry.', 'Snaps stay snaps on fast screens'],
 	recoverRigidMotion: ['Baked duplicators and deformers store every shape again on every frame. Copies that only move, turn or scale become one shape plus an animated transform. Usually the biggest saving.', 'Turns baked shapes back into motion'],
-	simplifyKeys: ['Baked motion has a keyframe on every frame. Removes keys you couldn’t see were missing: the result stays within ¼ px (or ¼°, ¼%) of the original.', 'Removes keys that aren’t visibly needed'],
-	roundPrecision: ['Rounds numbers to a precision you can’t see: positions to 0.01 px, opacity to 0.1%, colours to 0.001.', 'Rounds to invisible precision'],
+	simplifyKeys: ['Baked motion has a keyframe on every frame. Replaces runs of them with a few eased keys that follow the same motion, checked every half frame: shapes morphing, things moving along curves (as motion paths), fades and colours. Stays within the accuracy you pick.', 'Baked keys → a few smooth keys'],
+	simplifyPaths: ['Removes points from still shapes that don’t change the outline: points on straight edges, doubled points and extra points along curves, which are refitted. Corners stay. Skipped on layers with round corners, zig zag, pucker or offset.', 'Fewer points, same outline'],
+	roundPrecision: ['Rounds every number to the fewest decimals you can’t see at your accuracy, worked out per layer from how big it’s drawn.', 'Rounds to invisible precision'],
+}
+
+// A labelled dropdown that stores its index in settings[key].
+function choiceRow(key, title, entries, tip) {
+	var r = new ui.HLayout()
+	r.setMargins(8, 2, 8, 2)
+	r.setSpaceBetween(6)
+	r.add(label(title, 12, T.text))
+	r.addStretch()
+	var d = new ui.DropDown()
+	entries.forEach(function (e) {
+		d.addEntry(e.label)
+	})
+	d.setValue(Math.min(settings[key], entries.length - 1))
+	d.setToolTip(tip)
+	d.onValueChanged = function () {
+		settings[key] = d.getValue()
+		save()
+	}
+	r.add(d)
+	return r
 }
 
 function optionRow(key, title, tip, detail) {
@@ -248,12 +284,19 @@ exportPage.add(section('Optimise', T))
 var opts = list(260, T)
 ;['lossless', 'lossy'].forEach(function (group) {
 	opts.layout.add(label(group === 'lossy' ? 'Near-lossless · changes you can’t see' : 'Lossless · nothing changes on screen', 10, T.muted))
+	if (group === 'lossy') {
+		opts.layout.add(choiceRow('accuracy', 'Accuracy', ACCURACY, 'The most anything may move from the original, in pixels on screen. Balanced can’t be seen; Smallest can, just, on sharp edges up close.'))
+		opts.layout.add(choiceRow('display', 'Plays at', DISPLAY, 'The size the animation is shown at, compared to the comp. Smaller means less detail is needed, so files get smaller. Pick the largest size it’s ever shown at.'))
+	}
 	PASSES.forEach(function (p) {
 		var tip = TIPS[p.id] || [p.label, '']
 		if (p.group === group) opts.layout.add(optionRow(p.id, p.label, tip[0], tip[1]))
 	})
 })
 opts.layout.add(optionRow('holdAll', 'Hold every frame-by-frame key', 'Plays exactly Cavalry’s frames, with no in-between frames on fast screens. Smooth baked motion will step at your comp’s frame rate.', 'Exact frames, no in-betweens'))
+opts.layout.add(label('Images', 10, T.muted))
+opts.layout.add(optionRow('embedImages', 'Embed images in the file', 'Puts images inside the JSON, so it’s one file to hand over. Images grow by a third when embedded. Off: images are saved in an images folder next to the file.', 'One file, nothing to lose'))
+opts.layout.add(optionRow('jpegImages', 'Save opaque images as JPEG', 'Images with no transparency are saved as JPEG (85% quality) when that’s smaller. Slight JPEG softening. macOS only; Cavalry asks you to trust the script the first time.', 'Smaller, slightly softer'))
 opts.layout.add(label('Output', 10, T.muted))
 opts.layout.add(optionRow('stripNames', 'Strip layer and shape names', 'Smaller file. Leave off if a developer changes colours or text from code, since apps find layers by name.', 'Leave off if apps find layers by name'))
 opts.layout.add(optionRow('exponent', 'Short number format', 'Writes tiny and huge numbers in short form. Every player reads it.', '0.000001 → 1e-6'))
@@ -278,7 +321,7 @@ var kb = function (n) {
 }
 
 function passSettings() {
-	var o = { exponent: settings.exponent, pretty: settings.pretty }
+	var o = { exponent: settings.exponent, pretty: settings.pretty, accuracy: (ACCURACY[settings.accuracy] || ACCURACY[1]).px, display: (DISPLAY[settings.display] || DISPLAY[0]).scale }
 	PASSES.forEach(function (p) {
 		o[p.id] = settings[p.id]
 	})
@@ -287,9 +330,22 @@ function passSettings() {
 	return o
 }
 
-// Optimise, write, then preflight the result for the selected players.
-function optimiseAndWrite(json, out, extra) {
-	var result = optimise(json, passSettings())
+// Optimise, pack images, write, then preflight the result for the selected players.
+// dirs: folders the file's images can be found in.
+function optimiseAndWrite(json, out, extra, dirs) {
+	var ps = passSettings()
+	var result = optimise(json, ps)
+	var pack = packImages(result.json, dirs, api.getFolderFromPath(out), { embed: settings.embedImages, jpeg: settings.jpegImages })
+	if (pack.embedded || pack.copied) {
+		result.text = serialise(result.json, { pretty: ps.pretty, exponent: ps.exponent })
+		result.report[result.report.length - 1].bytes = result.text.length
+	}
+	var imageNote = []
+	if (pack.embedded) imageNote.push(pack.embedded + ' image(s) embedded')
+	if (pack.copied) imageNote.push(pack.copied + ' image(s) saved to images/')
+	if (pack.jpeg) imageNote.push(pack.jpeg + ' as JPEG')
+	if (pack.missing) imageNote.push(pack.missing + ' image(s) not found')
+	if (imageNote.length) extra = (extra || []).concat([imageNote.join(' · ')])
 	if (!api.writeToFile(out, result.text, true)) {
 		status.setText('Could not write ' + out)
 		return
@@ -312,7 +368,7 @@ function optimiseAndWrite(json, out, extra) {
 function runOptimiseFile() {
 	var path = api.presentOpenFile(api.getProjectPath() || api.getDesktopFolder(), 'Optimise Lottie', 'Lottie JSON (*.json)')
 	if (!path) return
-	optimiseAndWrite(JSON.parse(api.readFromFile(path)), path.replace(/(\.min)?\.json$/i, '') + '.min.json')
+	optimiseAndWrite(JSON.parse(api.readFromFile(path)), path.replace(/(\.min)?\.json$/i, '') + '.min.json', [], [api.getFolderFromPath(path)])
 }
 
 function runExport() {
@@ -323,14 +379,7 @@ function runExport() {
 	if (!/\.json$/i.test(out)) out += '.json'
 	status.setText('Exporting…')
 	var exported = exportSelected()
-	var images = 0
-	exported.dirs.forEach(function (d) {
-		images += copyImages(d, api.getFolderFromPath(out))
-	})
-	var extra = []
-	if (exported.note) extra.push(exported.note)
-	if (images) extra.push(images + ' image(s) copied to images/')
-	optimiseAndWrite(exported.json, out, extra)
+	optimiseAndWrite(exported.json, out, exported.note ? [exported.note] : [], exported.dirs)
 }
 
 // ---------- window ----------

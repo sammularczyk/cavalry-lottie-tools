@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Optimiser: baked keyframes are replaced with a few fitted, eased keys (checked every half frame); path morphs fit with one shared ease and curved motion becomes motion paths.
+- Optimiser: "Simplify still paths" removes points that don't change an outline, refitting curves either side.
+- Optimiser: baked squash and stretch is recovered as non-uniform scale, as well as move, turn and scale.
+- Optimiser: Accuracy (Exact / Balanced / Small file / Smallest) and Plays at (full / half / quarter size) set every tolerance in on-screen pixels, per layer from how big it's drawn.
+- Optimiser: images can be embedded in the JSON (on by default) and opaque PNGs saved as JPEG (macOS).
 - Lottie Importer moved here from Canvalry-scripts.
 - Importer: Normal blend mode maps to Cavalry's 3 (0 was ignored); Lottie Add maps to Plus Lighter.
 - Importer: scalar ease tangents no longer produce NaN handles; spatial samples use an exact bezier solve.

@@ -57,18 +57,3 @@ export function exportComp(compId, opts) {
 	var text = api.readFromFile(file)
 	return { json: JSON.parse(text), text: text, dir: dir, file: file, baked: restore.map(function (r) { return r[0] }) }
 }
-
-// Copy the export's images/ folder next to the final file (until images are embedded).
-export function copyImages(fromDir, toDir) {
-	var src = fromDir + '/images'
-	if (!api.filePathExists(src)) return 0
-	var dest = toDir + '/images' // copyFilePath creates it
-	var n = 0
-	api.listDirectory(src).forEach(function (f) {
-		var name = api.getFileNameFromPath(f)
-		var target = dest + '/' + name
-		if (api.filePathExists(target)) api.deleteFilePath(target)
-		if (api.copyFilePath(f, target)) n++
-	})
-	return n
-}
