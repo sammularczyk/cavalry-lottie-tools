@@ -1398,7 +1398,7 @@ function getAllShapesFromLayer(layer) {
 }
 
 // --- Layer transform from Lottie ks (p, a, s, r) ---
-// AE order: T(position) * R(rotation) * S(scale) * T(-anchor) on layer content.
+// Lottie order: T(position) * R(rotation) * S(scale) * T(-anchor) on layer content.
 // bakeAnchorIntoPosition=true: single group — bake anchor into position (wrong if R animates).
 // bakeAnchorIntoPosition=false: outer group gets T(p)*R*S only; anchor lives on a child pivot.
 function getLayerTransform(ks, yFlip, hasParent, compW, compH, scale, bakeAnchorIntoPosition) {
@@ -1470,7 +1470,7 @@ function getPivotAnchorForLayer(ks, precompW, precompH) {
     return { ax: ax, ay: ay };
 }
 
-// Outer = T(p)*R*S, inner = T(-anchor) so world matches AE when R animates.
+// Outer = T(p)*R*S, inner = T(-anchor) so world matches lottie-web when R animates.
 function buildLayerTransformRig(contentNodeId, layer, entry) {
     if (!contentNodeId || !layer) return { xform: contentNodeId, pivot: contentNodeId };
     // compositionReference layers: keep a single transform node with baked anchor.
@@ -1624,7 +1624,7 @@ function applyPathEasing(nodeId, attr, lottieKfs, timeOffset) {
 // position keyframes are correctly relative to the parent comp center.
 // anchorOnPivot: true when T(-anchor) is on a child pivot — do not fold anchor
 // into position keyframes or scale-driven position compensation (parent S handles it).
-// skipOpacity: true for null/proxy groups — AE null opacity does not affect children;
+// skipOpacity: true for null/proxy groups — Lottie null opacity does not affect children;
 // Cavalry group opacity would cascade and hide descendants.
 function keyframeAnimatedTransforms(nodeId, ks, yFlip, hasParent, compW, compH, scaleFactor, timeOffset, precompDims, parentPrecompDims, anchorOnPivot, skipOpacity) {
     if (!ks) return;
@@ -2144,7 +2144,7 @@ function animateCompoundShapePaths(shapeId, compoundPaths, yFlip, scaleFactor, t
 // Cavalry clipping mask mode enum:
 //   0 = Union, 1 = Subtract, 2 = Intersect, 3 = Difference
 //
-// AE/lottie-web evaluate masks sequentially. The first Add defines the initial
+// lottie-web evaluates masks sequentially. The first Add defines the initial
 // visible region (clip-to-shape -> Intersect). Later Adds union more area.
 // With nested groups each shape gets exactly one mask, so isFirstMask distinguishes
 // the innermost clip from subsequent wrappers.
@@ -2207,7 +2207,7 @@ function tryApplyLottieMaskExtras(mask, maskId, tgt, maskSlotIdx, timeOffset) {
         if (Math.abs(xNum) > 0.01 || xAnim) {
             if (!_lottieMaskPropsUnsupportedLogged) {
                 _lottieMaskPropsUnsupportedLogged = true;
-                console.log("Lottie Importer: Mask expansion (x) is not applied; results may differ from AE/lottie-web.");
+                console.log("Lottie Importer: Mask expansion (x) is not applied; results may differ from lottie-web.");
             }
         }
     }
@@ -2923,7 +2923,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
     }
 
     // Relocate each null group to the position of its topmost child in
-    // processLayers. AE render order is flat; Cavalry's is hierarchical —
+    // processLayers. Lottie render order is flat; Cavalry's is hierarchical —
     // children render at their parent group's stack position. Moving the
     // group above its first child ensures correct z-ordering after parenting.
     // Two-pass approach: collect all relocations first, then apply them
@@ -3378,7 +3378,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
             try { api.parent(childXform, uTarget); }
             catch (e) { console.log("Lottie Importer: Could not parent '" + (uLayer.nm || uLayer.ind) + "': " + e.message); }
 
-            // In AE a parent's transform applies even outside its in/out
+            // In Lottie a parent's transform applies even outside its in/out
             // range; Cavalry hides children of inactive parents, so expand.
             var frP = layerByInd[uLayer.parent];
             if (frP && uLayer.ip != null && frP.ip != null && uLayer.ip < frP.ip) {
@@ -3550,7 +3550,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
         var transform = getLayerTransform(tLayer.ks, yFlip, hasParent, compW, compH, scaleFactor, !usePivotRig);
 
         // In Cavalry, children of a compositionReference are positioned
-        // relative to the comp center. In AE, child positions are in the
+        // relative to the comp center. In Lottie, child positions are in the
         // parent's layer space (origin at top-left). Subtract the parent
         // comp center to align coordinate systems.
         var parentPCD = (tLayer.parent != null) ? precompDimsByInd[tLayer.parent] : null;

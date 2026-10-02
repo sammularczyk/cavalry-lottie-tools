@@ -1,4 +1,4 @@
-// Panel widgets styled like Easey / Defector (ae-to-cavalry): colours from Cavalry's theme
+// Panel widgets styled like Easey: colours from Cavalry's theme
 // so light themes work, rounded ui.Container rows with hover states, real ui.Buttons for
 // actions (long work started from a Container's mouse handler has crashed Cavalry).
 
