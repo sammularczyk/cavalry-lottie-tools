@@ -8,6 +8,7 @@ import { PLAYERS, checkLottie, describePlayers } from './modules/players.js'
 import { theme, label, section, button, row, toggleRow, list, tabStrip } from './modules/ui/kit.js'
 import { checkForUpdate } from './modules/updateChecker.js'
 import { exportComp, copyImages, BAKE_MODES } from './modules/cavalryExport.js'
+import { exportWithPrecomps } from './modules/precomps.js'
 
 var GITHUB_REPO = 'phillip-motion/cavalry-lottie-tools' // ponytail: confirm owner before first release
 var SCRIPT_NAME = 'Lottie Exporter Pro'
@@ -16,7 +17,7 @@ var PREF_KEY = 'lottieTools_exporter'
 // ---------- settings ----------
 
 function defaults() {
-	var s = { exponent: true, pretty: false, stripNames: false, bakeMode: 0, tab: 0, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
+	var s = { exponent: true, pretty: false, stripNames: false, precomps: true, bakeMode: 0, tab: 0, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
 	PASSES.forEach(function (p) {
 		s[p.id] = p.on
 	})
@@ -119,8 +120,17 @@ function selectedComp() {
 	return compIds[compDrop.getValue()]
 }
 
+// -> { json, dirs, note }
 function exportSelected() {
-	return exportComp(selectedComp(), { bakeMode: settings.bakeMode > 0 ? settings.bakeMode - 1 : null })
+	var opts = { bakeMode: settings.bakeMode > 0 ? settings.bakeMode - 1 : null }
+	if (!settings.precomps) {
+		var e = exportComp(selectedComp(), opts)
+		return { json: e.json, dirs: [e.dir], note: '' }
+	}
+	var r = exportWithPrecomps(selectedComp(), opts)
+	var note = r.refs ? r.refs + ' comp reference(s) → ' + r.precomps + ' precomp(s)' : ''
+	if (r.pivots || r.baked) note += (note ? ' · ' : '') + (r.pivots + r.baked) + ' position(s) corrected'
+	return { json: r.json, dirs: r.dirs, note: note }
 }
 
 // ---------- preflight page ----------
@@ -222,6 +232,14 @@ bakeDrop.onValueChanged = function () {
 	save()
 }
 exportPage.add(bakeDrop)
+exportPage.add(
+	optionRow(
+		'precomps',
+		'Comp references as precomps',
+		'Exports each referenced comp once and uses it as a Lottie precomp, with its time offset and time remapping. Also checks every layer against the scene and corrects positions Cavalry’s writer gets wrong around pivots. Turn off to use Cavalry’s own export as-is.',
+		'Fixes nested comps, timing and pivots'
+	)
+)
 
 exportPage.add(section('Optimise', T))
 var opts = list(260, T)
@@ -300,8 +318,13 @@ function runExport() {
 	if (!/\.json$/i.test(out)) out += '.json'
 	status.setText('Exporting…')
 	var exported = exportSelected()
-	var images = copyImages(exported.dir, api.getFolderFromPath(out))
-	var extra = ['Cavalry export ' + kb(exported.text.length) + (images ? ' · ' + images + ' image(s) copied to images/' : '')]
+	var images = 0
+	exported.dirs.forEach(function (d) {
+		images += copyImages(d, api.getFolderFromPath(out))
+	})
+	var extra = []
+	if (exported.note) extra.push(exported.note)
+	if (images) extra.push(images + ' image(s) copied to images/')
 	optimiseAndWrite(exported.json, out, extra)
 }
 
