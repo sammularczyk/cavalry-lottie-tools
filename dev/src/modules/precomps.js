@@ -120,19 +120,68 @@ function sceneRotationScale(L, id) {
 	return changed
 }
 
-// The writer always exports skew as 0. Cavalry's skew.x is a shear factor, not an angle:
-// x moves by skew·y (measured: 0.2618 shears by 0.2618, not tan 15°). Lottie's sk is an
-// angle in degrees whose tan is the shear, along axis 0; the sign agrees once y is flipped.
-// ponytail: skew.y isn't written (Lottie has one skew per axis); warn if it turns up. Driven skew is read at the current frame.
-function sceneSkew(L, id, warn) {
+// The writer always exports skew as 0. Cavalry's transform is R·S·K (skew first), K the
+// shear [[1, skew.x], [skew.y, 1]] in y-up space (measured: skew is a shear factor, not an
+// angle). lottie-web's is R·K·S with K = [[1, −tan sk], [0, 1]] (axis 0) in y-down space.
+// Any 2×2 splits that way, so rotation, scale and skew are rebuilt together: exactly for
+// vertical skew, both at once and non-uniform scale. Keyed or driven ones are sampled every
+// frame of `range` ([comp, from, to]); the optimiser fits keys to them again.
+export function lottieRSK(rotDeg, sx, sy, kx, ky) {
+	const th = (rotDeg * Math.PI) / 180, c = Math.cos(th), sn = Math.sin(th)
+	// Cavalry linear part, y up
+	const RS = [c * sx, -sn * sy, sn * sx, c * sy]
+	const A = [RS[0] + RS[1] * ky, RS[0] * kx + RS[1], RS[2] + RS[3] * ky, RS[2] * kx + RS[3]]
+	// to y down: flip y on both sides
+	const L = [A[0], -A[1], -A[2], A[3]]
+	const r = Math.atan2(L[2], L[0]), lc = Math.cos(r), ls = Math.sin(r)
+	const x2 = lc * L[1] + ls * L[3], y2 = -ls * L[1] + lc * L[3] // second column, unrotated
+	const lsx = Math.hypot(L[0], L[2])
+	return { r: (r * 180) / Math.PI, s: [lsx * 100, y2 * 100], sk: (Math.atan(-x2 / (y2 || 1e-12)) * 180) / Math.PI }
+}
+
+function sceneSkew(L, id, range) {
 	if (!L.ks || !api.hasAttribute(id, 'skew')) return false
-	const deg = (v) => (Math.atan(v) * 180) / Math.PI
-	const sk = api.get(id, 'skew') || {}
-	if (Math.abs(sk.y || 0) > 1e-6 || (api.getAnimatedAttributes(id) || []).indexOf('skew.y') >= 0) warn('Vertical skew on ' + api.getNiceName(id) + ' isn’t exported')
-	const keyed = (api.getAnimatedAttributes(id) || []).indexOf('skew.x') >= 0
-	if (!keyed && Math.abs(sk.x || 0) < 1e-6) return false
-	L.ks.sk = keyed ? sceneKeys(id, 'skew.x', deg) : { a: 0, k: deg(sk.x) }
+	const keyedOrDriven = (a) => (api.getAnimatedAttributes(id) || []).some((x) => x.indexOf(a) === 0) || drivenAttr(id, a)
+	const skew = api.get(id, 'skew') || {}
+	const moving = keyedOrDriven('skew')
+	if (!moving && Math.abs(skew.x || 0) < 1e-6 && Math.abs(skew.y || 0) < 1e-6) return false
+	const at = () => {
+		const sk = api.get(id, 'skew') || {}, sc = api.get(id, 'scale') || {}
+		return lottieRSK((api.get(id, 'rotation') || {}).z || 0, sc.x != null ? sc.x : 1, sc.y != null ? sc.y : 1, sk.x || 0, sk.y || 0)
+	}
 	L.ks.sa = { a: 0, k: 0 }
+	// horizontal skew under uniform scale commutes with it: keep the scene's keys and eases
+	const sc0 = api.get(id, 'scale') || {}
+	const uniform = !keyedOrDriven('scale') && Math.abs((sc0.x || 1) - (sc0.y || 1)) < 1e-9
+	const deg = (v) => (Math.atan(v) * 180) / Math.PI
+	if (uniform && !keyedOrDriven('skew.y') && Math.abs(skew.y || 0) < 1e-6 && !drivenAttr(id, 'skew')) {
+		const keyed = (api.getAnimatedAttributes(id) || []).indexOf('skew.x') >= 0
+		L.ks.sk = keyed ? sceneKeys(id, 'skew.x', deg) : { a: 0, k: deg(skew.x) }
+		return true
+	}
+	if (!moving && !keyedOrDriven('rotation') && !keyedOrDriven('scale')) {
+		const v = at()
+		L.ks.r = { a: 0, k: v.r }
+		L.ks.s = { a: 0, k: [v.s[0], v.s[1], 100] }
+		L.ks.sk = { a: 0, k: v.sk }
+		return true
+	}
+	if (!range) return false
+	const [comp, from, to] = range
+	api.setActiveComp(comp)
+	const vals = []
+	for (let f = from; f <= to; f++) {
+		api.setFrame(f)
+		const v = at()
+		// keep rotation continuous (atan2 wraps at ±180)
+		if (vals.length) while (v.r - vals[vals.length - 1].r > 180) v.r -= 360
+		if (vals.length) while (v.r - vals[vals.length - 1].r < -180) v.r += 360
+		vals.push(v)
+	}
+	L.ks.r = frameKeys(vals, from, (v) => [v.r])
+	L.ks.s = frameKeys(vals, from, (v) => [v.s[0], v.s[1], 100])
+	L.ks.sk = frameKeys(vals, from, (v) => [v.sk])
+	for (const f of ['r', 'sk']) if (!L.ks[f].a) L.ks[f] = { a: 0, k: L.ks[f].k[0] }
 	return true
 }
 
@@ -987,7 +1036,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 			if (!id) continue
 			sceneTransformKeys(L, id)
 			sceneRotationScale(L, id)
-			sceneSkew(L, id, (w) => warnings.push(w))
+			sceneSkew(L, id, [comp, api.get(comp, 'startFrame'), last])
 			if (L.ty !== 0) sceneOpacity(L, id, [comp, api.get(comp, 'startFrame'), last])
 			sceneEases(L, id)
 			sceneHolds(L, id)

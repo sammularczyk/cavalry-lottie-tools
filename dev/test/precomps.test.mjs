@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { applyMasks, fillProps, layerMatrix, padMatteBounds, repairPositions, staticSingleKeys, valueAt } from '../src/modules/precomps.js'
+import { applyMasks, fillProps, layerMatrix, lottieRSK, padMatteBounds, repairPositions, staticSingleKeys, valueAt } from '../src/modules/precomps.js'
 
 // Rect centres measured in Cavalry (y up, origin at the comp centre) at frames 0, 5, 10.
 const CAVALRY = {
@@ -138,4 +138,23 @@ test('padMatteBounds covers a line whose group moves', () => {
 	assert.equal(padMatteBounds(L), true)
 	const rc = L.shapes[1].it[0]
 	assert.deepEqual([rc.p.k, rc.s.k], [[50, 200], [108, 308]]) // y 50..350, plus the stroke
+})
+
+test('lottieRSK rebuilds Cavalry rotation, scale and skew (both axes) as lottie-web draws them', () => {
+	// a point at (100, 40) under a group, measured in Cavalry (y up) with getPivotPosition
+	const MEASURED = [
+		[{ ky: 0.5 }, [100, 90]],
+		[{ kx: 0.5 }, [120, 40]],
+		[{ ky: 0.5, sx: 2 }, [200, 90]],
+		[{ ky: 0.5, sy: 2 }, [100, 180]],
+		[{ ky: 0.5, r: 90 }, [-90, 100]],
+		[{ kx: 0.5, r: 90 }, [-40, 120]],
+		[{ kx: 0.3, ky: 0.5, r: 30, sx: 1.5, sy: 0.8 }, [109.492, 146.354]],
+	]
+	for (const [o, want] of MEASURED) {
+		const v = lottieRSK(o.r || 0, o.sx || 1, o.sy || 1, o.kx || 0, o.ky || 0)
+		const m = layerMatrix({ r: { a: 0, k: v.r }, s: { a: 0, k: v.s }, sk: { a: 0, k: v.sk } }, 0)
+		const x = m[0] * 100 + m[1] * -40 + m[4], y = m[2] * 100 + m[3] * -40 + m[5] // y down
+		assert.ok(Math.abs(x - want[0]) < 0.01 && Math.abs(-y - want[1]) < 0.01, JSON.stringify([o, x, -y]))
+	}
 })

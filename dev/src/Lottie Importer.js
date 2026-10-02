@@ -1108,6 +1108,7 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 strokeInfo: localStroke,
                 isCompound: true,
                 compoundPaths: compParts,
+                trChain: trChain,
                 lottieFillRule: localFillRule,
                 groupOpacity: newO,
                 fillOpacity: localFillOpacity,
@@ -1306,7 +1307,9 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
             compoundParts.push({
                 pathData: subPathData,
                 pathKs: subPathKs,
-                groupOffset: [curX + sPt[0], curY + sPt[1]]
+                groupOffset: [curX + sPt[0], curY + sPt[1]],
+                rawPathData: subPathData,
+                partTr: subTrItem
             });
         }
         if (allQualify && compoundParts.length > 1) {
@@ -1327,7 +1330,8 @@ function collectShapesFromItems(items, accX, accY, inheritedFill, inheritedGradi
                 fillOpacityKs: localFillOpacityKs,
                 rdValue: localRdValue,
                 opAmount: localOpAmount,
-                trimInfo: localTrimInfo
+                trimInfo: localTrimInfo,
+                trChain: trChain
             });
             return;
         }
@@ -1414,7 +1418,7 @@ function getAllShapesFromLayer(layer) {
 // skew; anchor still) instead keeps that group's keys and eases on the Cavalry shape's own
 // transform: the outer groups fold into them, the inner ones and the anchor into the points.
 // Anything else is baked: the path's points on every frame. Group opacity that animates is
-// keyed on the shape. ponytail: compound paths and animated rectangles/ellipses under a moving group stay frozen.
+// keyed on the shape.
 
 function lottieKeyed(p) {
     if (!p) return false;
@@ -1511,16 +1515,34 @@ function mapPathKs(pathKs, M) {
     }) };
 }
 
+// A rectangle or ellipse whose own size, position or roundness animates.
+function paramAnimated(item) {
+    return !!item && (lottieKeyed(item.s) || lottieKeyed(item.p) || lottieKeyed(item.r));
+}
+// A part's own points at frame t: its path keys, or its rectangle/ellipse rebuilt.
+function partPathAt(part, t) {
+    var item = part.rcItem || part.elItem;
+    if (paramAnimated(item)) {
+        var size = lottieValueAt(item.s, t, [100, 100]), pos = lottieValueAt(item.p, t, [0, 0]);
+        return part.rcItem ? rectToPathData(item, size, pos, lottieValueAt(item.r, t, [0])[0]) : ellipseToPathData(item, size, pos);
+    }
+    return pathDataAt(part.pathKs, part.rawPathData, t);
+}
+
 function localiseGroupAnimation(r, layer) {
     var chain = r.trChain;
-    if (!chain || !chain.length || !r.rawPathData || r.isCompound || r.polyStar) return;
+    if (!chain || !chain.length || r.polyStar) return;
+    var parts = r.isCompound ? (r.compoundPaths || []) : [r];
+    if (!parts.length || parts.some(function (q) { return !q.rawPathData && !q.rcItem && !q.elItem; })) return;
     var MOVE = ["p", "a", "s", "r", "sk", "sa"];
+    var keyedTr = function (tr) { return !!tr && MOVE.some(function (f) { return lottieKeyed(tr[f]); }); };
     var moving = [], fading = [];
     for (var i = 0; i < chain.length; i++) {
-        if (MOVE.some(function (f) { return lottieKeyed(chain[i][f]); })) moving.push(i);
+        if (keyedTr(chain[i])) moving.push(i);
         if (lottieKeyed(chain[i].o)) fading.push(i);
     }
-    if (!moving.length && !fading.length) return;
+    var partsMove = parts.some(function (q) { return keyedTr(q.partTr); });
+    if (!moving.length && !fading.length && !partsMove) return;
     var from = layer.ip || 0, to = Math.max(from, (layer.op != null ? layer.op : from + 1) - 1);
     if (fading.length) {
         var staticO = 1;
@@ -1541,17 +1563,23 @@ function localiseGroupAnimation(r, layer) {
             r.groupOpacityKs = { a: 1, k: ok };
         }
     }
-    if (!moving.length) return;
-    if ((r.elItem || r.rcItem) && !r.pathKs) { console.log("Lottie Importer: an animated rectangle or ellipse under a moving group keeps the group still"); return; }
-    var k = moving[0], T = chain[k];
-    var outer = chainMatrixAt(chain, 0, k, 0);
-    var det = outer[0] * outer[3] - outer[1] * outer[2];
-    var so = Math.sqrt(Math.abs(det));
-    var similar = det > 0 && Math.abs(outer[0] - outer[3]) < 1e-6 * Math.max(1, so) && Math.abs(outer[1] + outer[2]) < 1e-6 * Math.max(1, so);
-    var editable = moving.length === 1 && similar && !(T.p && T.p.s) && !lottieKeyed(T.a) && !lottieKeyed(T.sk) && !lottieKeyed(T.sa) && !((lottieValueAt(T.sk, 0, [0])[0]) || 0);
+    if (!moving.length && !partsMove) return;
+    var partM = function (q, t) { return q.partTr ? groupMatrixAt(q.partTr, t) : [1, 0, 0, 1, 0, 0]; };
+    var k = moving.length ? moving[0] : -1, T = chain[k];
+    var editable = false;
+    if (moving.length === 1 && !partsMove) {
+        var outer = chainMatrixAt(chain, 0, k, 0);
+        var det = outer[0] * outer[3] - outer[1] * outer[2];
+        var so = Math.sqrt(Math.abs(det));
+        var similar = det > 0 && Math.abs(outer[0] - outer[3]) < 1e-6 * Math.max(1, so) && Math.abs(outer[1] + outer[2]) < 1e-6 * Math.max(1, so);
+        var inner = chainMatrixAt(chain, k + 1, chain.length, 0);
+        var shifts = function (M) { return Math.abs(M[0] - 1) < 1e-9 && Math.abs(M[3] - 1) < 1e-9 && Math.abs(M[1]) < 1e-9 && Math.abs(M[2]) < 1e-9; };
+        // a rectangle/ellipse rebuilds its own path, so the groups inside may only move it
+        var paramOk = parts.every(function (q) { return !paramAnimated(q.rcItem || q.elItem) || (!r.isCompound && shifts(inner)); });
+        editable = similar && paramOk && !(T.p && T.p.s) && !lottieKeyed(T.a) && !lottieKeyed(T.sk) && !lottieKeyed(T.sa) && !((lottieValueAt(T.sk, 0, [0])[0]) || 0);
+    }
     if (editable) {
         // shape = outer · (p + R·S·(inner·x − a)): inner into the points, −a into the offset
-        var inner = chainMatrixAt(chain, k + 1, chain.length, 0);
         var a = lottieValueAt(T.a, 0, [0, 0]);
         var ro = Math.atan2(outer[2], outer[0]) * 180 / Math.PI;
         var mapP = function (q) { return [outer[0] * q[0] + outer[1] * q[1] + outer[4], outer[2] * q[0] + outer[3] * q[1] + outer[5]]; };
@@ -1571,19 +1599,35 @@ function localiseGroupAnimation(r, layer) {
             r: mapKeys(T.r, function (v) { return [(v[0] || 0) + ro]; }, [0]),
             s: mapKeys(T.s, function (v) { return [(v[0] != null ? v[0] : 100) * so, (v[1] != null ? v[1] : v[0] != null ? v[0] : 100) * so]; }, [100, 100])
         };
-        r.pathData = transformPathByMatrix(r.rawPathData, inner);
-        r.pathKs = mapPathKs(r.pathKs, inner);
-        r.groupOffset = [-(a[0] || 0), -(a[1] || 0)];
+        parts.forEach(function (q) {
+            var M = mulMatrix(inner, partM(q, 0));
+            if (paramAnimated(q.rcItem || q.elItem)) {
+                q.pathData = q.rawPathData || q.pathData;
+                q.groupOffset = [M[4] - (a[0] || 0), M[5] - (a[1] || 0)]; // inner only moves it
+                return;
+            }
+            q.pathData = transformPathByMatrix(q.rawPathData, M);
+            q.pathKs = mapPathKs(q.pathKs, M);
+            q.groupOffset = [-(a[0] || 0), -(a[1] || 0)];
+        });
+        if (r.isCompound) { r.pathData = parts[0].pathData; r.groupOffset = parts[0].groupOffset; }
         return;
     }
-    var keys = [];
-    for (var t = from; t <= to; t++) {
-        var sh = transformPathByMatrix(pathDataAt(r.pathKs, r.rawPathData, t), chainMatrixAt(chain, 0, chain.length, t));
-        keys.push(t < to ? { t: t, s: [sh], o: { x: 0, y: 0 }, i: { x: 1, y: 1 } } : { t: t, s: [sh] });
-    }
-    r.pathKs = keys.length > 1 ? { a: 1, k: keys } : null;
-    r.pathData = keys[0].s[0];
-    r.groupOffset = [0, 0];
+    // baked: every part's points on every frame
+    parts.forEach(function (q) {
+        var keys = [];
+        for (var t = from; t <= to; t++) {
+            var M = mulMatrix(chainMatrixAt(chain, 0, chain.length, t), partM(q, t));
+            var sh = transformPathByMatrix(partPathAt(q, t), M);
+            keys.push(t < to ? { t: t, s: [sh], o: { x: 0, y: 0 }, i: { x: 1, y: 1 } } : { t: t, s: [sh] });
+        }
+        q.pathKs = keys.length > 1 ? { a: 1, k: keys } : null;
+        q.pathData = keys[0].s[0];
+        q.groupOffset = [0, 0];
+        q.rcItem = null;
+        q.elItem = null;
+    });
+    if (r.isCompound) { r.pathData = parts[0].pathData; r.groupOffset = [0, 0]; }
 }
 
 // Keys from localiseGroupAnimation onto the created Cavalry shape.
@@ -3447,6 +3491,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                 }
                 applyShapeStyle(shapeId, s0c, scaleFactor, tOff, yFlip);
                 animateCompoundShapePaths(shapeId, s0c.compoundPaths, yFlip, scaleFactor, tOff);
+                applyGroupAnimation(shapeId, s0c, yFlip, scaleFactor, tOff);
                 try { nodeId = createGroup(name); } catch (e) { nodeId = shapeId; }
                 if (nodeId !== shapeId) { try { api.parent(shapeId, nodeId); } catch (e) {} }
                 targetIds = [shapeId];
@@ -3527,6 +3572,7 @@ function importLayerSet(layers, assets, yFlip, scaleFactor, compW, compH, groupI
                         } catch (e) { continue; }
                         applyShapeStyle(subId, s, scaleFactor, tOff, yFlip);
                         animateCompoundShapePaths(subId, s.compoundPaths, yFlip, scaleFactor, tOff);
+                        applyGroupAnimation(subId, s, yFlip, scaleFactor, tOff);
                     } else {
                         if (!s.pathData) continue;
                         var sp = lottiePathToCavalryPath(s.pathData, yFlip, scaleFactor, s.groupOffset);

@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- Exporter: vertical skew exports, as do both skews at once and skew under non-uniform scale. Cavalry skews before scaling and lottie-web after, so rotation, scale and skew are rebuilt together (checked against Cavalry); keyed or driven ones are sampled every frame.
+- Importer: compound shapes and animated rectangles/ellipses under a moving group keep its animation too.
 - Optimiser: "Share identical layers as one precomp" also shares copies that are track-matted, masked or carry effects; each copy keeps its own matte, masks, effects and transform (mirrored copies included). The CTV intro went from 278 KB to 253 KB, drawing the same in lottie-web.
 - Importer: animated shape-group transforms import (they froze at their first value). A path under one moving group keeps that group's keys and eases on its own transform, and stays editable; anything else is baked to the path on every frame. Animated group opacity is keyed on the shape.
 - Exporter: driven (connected) opacity and Fill filter colours are sampled every frame instead of read at the current one.
