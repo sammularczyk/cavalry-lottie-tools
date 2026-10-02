@@ -195,6 +195,101 @@ function sceneHolds(L, id) {
 	return n
 }
 
+// The writer bakes many keyframed transforms to one key per frame (flame scale: ~490 keys
+// where the scene has a handful). Use the scene's own keys and eases instead, but only
+// when they reproduce the writer's bake on every frame; magic easing, drivers and
+// anything else that doesn't match keeps the bake. Position offsets are fixed later by
+// the pivot repair, so position is compared after removing a constant offset.
+function sourceOf(id, attr) {
+	const conn = api.getInConnectedAttributes(id) || []
+	if (conn.indexOf(attr) < 0) return (api.getAnimatedAttributes(id) || []).indexOf(attr) >= 0 ? [id, attr] : null
+	const src = String(api.getInConnection(id, attr) || '')
+	const dot = src.indexOf('.')
+	if (dot < 0) return null
+	const sid = src.slice(0, dot), sattr = src.slice(dot + 1)
+	return (api.getAnimatedAttributes(sid) || []).indexOf(sattr) >= 0 ? [sid, sattr] : null
+}
+
+function matchesBake(fresh, baked, from, to, tol, offset) {
+	if (!isAnimated(baked) || baked.k.length < 4) return false // not a bake worth replacing
+	let d0 = null
+	for (let t = from; t <= to; t++) {
+		const a = valueAt(fresh, t), b = valueAt(baked, t)
+		if (!a || !b) return false
+		for (let i = 0; i < Math.min(a.length, b.length, 2); i++) {
+			let d = a[i] - b[i]
+			if (offset) {
+				if (d0 === null) d0 = []
+				if (d0[i] === undefined) d0[i] = d
+				d -= d0[i]
+			}
+			if (Math.abs(d) > tol) return false
+		}
+	}
+	return true
+}
+
+function sceneTransformKeys(L, id) {
+	if (!L.ks) return 0
+	const ks = L.ks
+	const range = (p) => [p.k[0].t, p.k[p.k.length - 1].t]
+	let n = 0
+	const r = sourceOf(id, 'rotation.z')
+	if (r && isAnimated(ks.r)) {
+		const fresh = sceneKeys(r[0], r[1], (v) => -v)
+		const [a, b] = range(ks.r)
+		if (matchesBake(fresh, ks.r, a, b, 0.05)) (ks.r = fresh), n++
+	}
+	const sx = sourceOf(id, 'scale.x'), sy = sourceOf(id, 'scale.y')
+	if ((sx || sy) && isAnimated(ks.s)) {
+		const X = sx ? sceneKeys(sx[0], sx[1], (v) => v * 100) : { a: 0, k: api.get(id, 'scale').x * 100 }
+		const Y = sy ? sceneKeys(sy[0], sy[1], (v) => v * 100) : { a: 0, k: api.get(id, 'scale').y * 100 }
+		const fresh = combine2(X, Y)
+		const [a, b] = range(ks.s)
+		if (fresh && matchesBake(fresh, ks.s, a, b, 0.05)) (ks.s = fresh), n++
+	}
+	if (ks.p && ks.p.s) {
+		for (const [axis, sign] of [['x', 1], ['y', -1]]) {
+			const src = sourceOf(id, 'position.' + axis)
+			if (!src || !isAnimated(ks.p[axis])) continue
+			const fresh = sceneKeys(src[0], src[1], (v) => sign * v)
+			const [a, b] = range(ks.p[axis])
+			if (!matchesBake(fresh, ks.p[axis], a, b, 0.05, true)) continue
+			// keep the bake's absolute placement: shift the scene keys by the constant offset
+			const off = valueAt(ks.p[axis], a)[0] - valueAt(fresh, a)[0]
+			ks.p[axis] = isAnimated(fresh) ? Object.assign({}, fresh, { k: fresh.k.map((kf) => Object.assign({}, kf, { s: [kf.s[0] + off] })) }) : { a: 0, k: fresh.k + off }
+			n++
+		}
+	}
+	return n
+}
+
+// Two 1D properties as one 2D Lottie property; null if their keys aren't at the same frames.
+function combine2(X, Y) {
+	const ax = isAnimated(X), ay = isAnimated(Y)
+	if (!ax && !ay) return { a: 0, k: [asNum(X), asNum(Y), 100] }
+	const times = (ax ? X : Y).k.map((k) => k.t)
+	if (ax && ay && (X.k.length !== Y.k.length || X.k.some((k, j) => k.t !== Y.k[j].t))) return null
+	const at = (P, j) => (isAnimated(P) ? P.k[j] : { s: [asNum(P)] })
+	return {
+		a: 1,
+		k: times.map((t, j) => {
+			const x = at(X, j), y = at(Y, j)
+			const kf = { t, s: [x.s[0], y.s[0], 100] }
+			if (j < times.length - 1) {
+				if (x.h === 1 || y.h === 1) kf.h = 1
+				else {
+					const e = (q, f, d) => (q[f] ? q[f][d][0] : f === 'o' ? 0 : 1)
+					kf.o = { x: [e(x, 'o', 'x'), e(y, 'o', 'x'), 0], y: [e(x, 'o', 'y'), e(y, 'o', 'y'), 0] }
+					kf.i = { x: [e(x, 'i', 'x'), e(y, 'i', 'x'), 1], y: [e(x, 'i', 'y'), e(y, 'i', 'y'), 1] }
+				}
+			}
+			return kf
+		}),
+	}
+}
+const asNum = (P) => (Array.isArray(P.k) ? P.k[0] : P.k)
+
 // The writer drops opacity on groups (static 100 or its animation): take it from the scene.
 function sceneOpacity(L, id) {
 	if (!L.ks) return false
@@ -593,6 +688,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 		for (const L of exported.layers) {
 			const id = sceneOf.get(L)
 			if (!id) continue
+			sceneTransformKeys(L, id)
 			sceneRotationScale(L, id)
 			if (L.ty !== 0) sceneOpacity(L, id)
 			sceneHolds(L, id)

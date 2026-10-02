@@ -15,3 +15,5 @@
 - Exporter: static rotation and scale are taken from the scene (the writer exported some comp references unrotated).
 - Optimiser: "Hold one-frame jumps" (on by default) holds the key before a value that jumps between adjacent frames, so players drawing in-between frames don't slide it; optional "Hold every frame-by-frame key" steps exactly like Cavalry's frames.
 - Exporter: hold (step) keys are restored from the scene; Cavalry's writer exports them as eases, so values Cavalry holds then snaps (the dreidel lines' stroke width) faded across the gap.
+- Optimiser: still group layers fold into their children ("Fold still group layers").
+- Exporter: keyframed transforms the writer baked per frame use the scene's keys and eases instead, when they reproduce the bake on every frame.
