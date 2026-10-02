@@ -47,25 +47,25 @@ var FATAL = '#e5534b'
 
 // Tooltip (long) and row detail (one short line) per pass.
 var TIPS = {
-	removeHidden: ['Hidden layers and shapes (hd). Parents and matte sources are kept.', 'Hidden layers and shapes'],
-	removeDeadLayers: ['Layers with an empty time range or opacity 0 the whole time.', 'Never on screen'],
-	flattenShapeGroups: ['A shape group that is the only item at its level and has an identity transform gives its contents to the level above. Fills, strokes and modifiers keep the same scope, so nothing drawn changes. Cavalry nests every path in groups inside groups.', 'Groups inside groups → flat'],
-	foldStaticParents: ['Group layers that draw nothing and never move are folded into their children’s transforms and removed. Cavalry writes every group as a layer, which roughly doubles files.', 'Still groups → merged into children'],
-	removeIdentityNulls: ['Null layers that do not move anything (Cavalry adds one per comp).', 'Nulls that move nothing'],
-	removeUnusedAssets: ['Images and precomps no layer refers to.', 'Nothing refers to them'],
-	dedupeAssets: ['Identical precomps or images become one asset.', 'Identical precomps and images'],
-	trimToLayerRange: ['Keyframes outside each layer’s in/out range, keeping one on each side.', 'Keys outside each layer’s range'],
-	instanceLayers: ['Layers with identical content are written once as a precomp and reused. Cavalry writes every duplicate and comp reference out in full; After Effects exports share precomps.', 'Duplicate layers → one shared precomp'],
-	collapseStatic: ['Animated properties whose keys all hold the same value.', 'Keys that all hold one value'],
-	removeRedundantKeys: ['Keys inside a constant run, or exactly on a straight line.', 'Keys that change nothing'],
-	trimKeyframeFields: ['Tangents on hold and last keys, legacy end values; linear eases written short.', 'Unused tangents and end values'],
-	removeDefaults: ['Zero skew, auto-orient off, empty names.', 'Zero skew, empty names'],
-	unwrapScalars: ['Store [5] as 5 on static values.', '[5] → 5'],
-	stripMeta: ['ln, cl, meta and effect match names.', 'ln, cl, meta, match names'],
-	holdJumps: ['Players draw in-between frames on fast displays, so a value that jumps from one frame to the next (a baked path wrapping round, a layer snapping into place) would slide. Holds the key before each one-frame jump, as Cavalry shows it.', 'Snaps stay snaps between frames'],
-	recoverRigidMotion: ['Baked duplicator/deformer copies that only move, turn or scale keep one path and animate their transform instead. Biggest saving on baked scenes.', 'Baked copies → one path + transform'],
-	simplifyKeys: ['Drops baked keys that lie within a fraction of a pixel (or degree, or %) of a straight line between their neighbours.', 'Baked keys within ¼ px of a line'],
-	roundPrecision: ['Positions and paths to 0.01 px, opacity to 0.1, colours to 0.001.', '0.01 px, 0.1 opacity, 0.001 colour'],
+	removeHidden: ['Anything you hid in Cavalry is left out. Layers other layers depend on (parents, mattes) are kept.', 'Leaves out hidden layers'],
+	removeDeadLayers: ['Layers that are never on screen: fully transparent the whole time, or outside the timeline.', 'Leaves out layers you never see'],
+	flattenShapeGroups: ['Cavalry wraps every shape in several empty groups. This unwraps groups that do nothing, so the shape looks exactly the same.', 'Unwraps empty shape groups'],
+	foldStaticParents: ['Cavalry writes every group as its own layer. Groups that don’t move or draw anything are merged into their children, which often halves the file.', 'Merges still groups into their children'],
+	removeIdentityNulls: ['Removes empty nulls that don’t move anything. Cavalry adds one per comp.', 'Removes nulls that do nothing'],
+	removeUnusedAssets: ['Removes images and comps that no layer uses.', 'Removes unused images and comps'],
+	dedupeAssets: ['When the same image or comp is in the file twice, keeps one copy.', 'Keeps one copy of duplicates'],
+	trimToLayerRange: ['Removes keyframes from before a layer starts and after it ends.', 'Removes keys outside a layer’s time'],
+	instanceLayers: ['When layers are exact copies (duplicators, repeated comps), the content is written once and reused. Cavalry writes every copy out in full.', 'Writes repeated content once'],
+	collapseStatic: ['A property whose keyframes all hold the same value becomes a plain value.', 'Turns “animated” constants into values'],
+	removeRedundantKeys: ['Removes keyframes that don’t change the motion: repeats, or keys on a straight line.', 'Removes keys that change nothing'],
+	trimKeyframeFields: ['Removes keyframe data that players never read.', 'Removes unused keyframe data'],
+	removeDefaults: ['Leaves out settings that already match the default.', 'Leaves out default settings'],
+	unwrapScalars: ['Writes single values more compactly.', 'Writes single values more compactly'],
+	stripMeta: ['Removes notes and labels that only After Effects or Cavalry use.', 'Removes editor-only notes'],
+	holdJumps: ['Phones and 120 Hz screens draw frames in between yours. A value that snaps from one frame to the next would slide; this keeps it a snap, as in Cavalry.', 'Snaps stay snaps on fast screens'],
+	recoverRigidMotion: ['Baked duplicators and deformers store every shape again on every frame. Copies that only move, turn or scale become one shape plus an animated transform. Usually the biggest saving.', 'Turns baked shapes back into motion'],
+	simplifyKeys: ['Baked motion has a keyframe on every frame. Removes keys you couldn’t see were missing: the result stays within ¼ px (or ¼°, ¼%) of the original.', 'Removes keys that aren’t visibly needed'],
+	roundPrecision: ['Rounds numbers to a precision you can’t see: positions to 0.01 px, opacity to 0.1%, colours to 0.001.', 'Rounds to invisible precision'],
 }
 
 function optionRow(key, title, tip, detail) {
@@ -224,12 +224,12 @@ function checkFile() {
 
 var exportPage = page()
 var bakeDrop = new ui.DropDown()
-bakeDrop.addEntry('Bake: as set on each layer')
-BAKE_MODES.forEach(function (m) {
-	bakeDrop.addEntry('Bake: force ' + m)
+// Labels follow BAKE_MODES order.
+;['Baking: use each layer’s setting', 'Baking: automatic for every layer', 'Baking: shapes every frame', 'Baking: shapes and colours every frame', 'Baking: one layer per frame (largest)', 'Baking: freeze, no animation'].forEach(function (l) {
+	bakeDrop.addEntry(l)
 })
 bakeDrop.setValue(settings.bakeMode)
-bakeDrop.setToolTip('Overrides each layer’s Lottie Baking for this export only; your scene is restored afterwards.')
+bakeDrop.setToolTip('How Cavalry turns things Lottie can’t describe (duplicators, deformers, behaviours) into keyframes. Applies to this export only; your layers’ settings are put back afterwards. Automatic is usually best; the optimiser shrinks baked frames afterwards.')
 bakeDrop.onValueChanged = function () {
 	settings.bakeMode = bakeDrop.getValue()
 	save()
@@ -239,7 +239,7 @@ exportPage.add(
 	optionRow(
 		'precomps',
 		'Comp references as precomps',
-		'Exports each referenced comp once and uses it as a Lottie precomp, with its time offset and time remapping. Also checks every layer against the scene and corrects positions Cavalry’s writer gets wrong around pivots. Turn off to use Cavalry’s own export as-is.',
+		'Writes each comp once and reuses it, so nested comps keep animating with the right timing. Also fixes positions Cavalry’s exporter gets wrong around pivots. Turn off to use Cavalry’s export unchanged.',
 		'Fixes nested comps, timing and pivots'
 	)
 )
@@ -247,17 +247,17 @@ exportPage.add(
 exportPage.add(section('Optimise', T))
 var opts = list(260, T)
 ;['lossless', 'lossy'].forEach(function (group) {
-	opts.layout.add(label(group === 'lossy' ? 'Lossy · within a fraction of a pixel' : 'Lossless', 10, T.muted))
+	opts.layout.add(label(group === 'lossy' ? 'Near-lossless · changes you can’t see' : 'Lossless · nothing changes on screen', 10, T.muted))
 	PASSES.forEach(function (p) {
 		var tip = TIPS[p.id] || [p.label, '']
 		if (p.group === group) opts.layout.add(optionRow(p.id, p.label, tip[0], tip[1]))
 	})
 })
-opts.layout.add(optionRow('holdAll', 'Hold every frame-by-frame key', 'Every key one frame from the next holds until the next frame, so playback steps exactly like Cavalry’s frames even on 120 Hz screens. Smooth baked motion then steps at the comp’s frame rate.', 'Exact Cavalry frames, no in-betweens'))
+opts.layout.add(optionRow('holdAll', 'Hold every frame-by-frame key', 'Plays exactly Cavalry’s frames, with no in-between frames on fast screens. Smooth baked motion will step at your comp’s frame rate.', 'Exact frames, no in-betweens'))
 opts.layout.add(label('Output', 10, T.muted))
-opts.layout.add(optionRow('stripNames', 'Strip layer and shape names', 'Keeps names that expressions refer to. Leave off if apps look layers up by name (iOS/Android KeyPaths).', 'Breaks name lookups in apps'))
-opts.layout.add(optionRow('exponent', 'Short number format', 'Writes very small and very large numbers in exponent form.', '0.000001 → 1e-6'))
-opts.layout.add(optionRow('pretty', 'Pretty print', 'Indented JSON for reading; much larger.', 'Readable, much larger'))
+opts.layout.add(optionRow('stripNames', 'Strip layer and shape names', 'Smaller file. Leave off if a developer changes colours or text from code, since apps find layers by name.', 'Leave off if apps find layers by name'))
+opts.layout.add(optionRow('exponent', 'Short number format', 'Writes tiny and huge numbers in short form. Every player reads it.', '0.000001 → 1e-6'))
+opts.layout.add(optionRow('pretty', 'Pretty print', 'Spaced out so people can read it. Much larger; use for debugging only.', 'Readable, much larger'))
 opts.layout.addStretch()
 exportPage.add(opts.widget)
 
