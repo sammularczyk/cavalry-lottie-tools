@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { repairPositions, staticSingleKeys, valueAt } from '../src/modules/precomps.js'
+import { applyMasks, repairPositions, staticSingleKeys, valueAt } from '../src/modules/precomps.js'
 
 // Rect centres measured in Cavalry (y up, origin at the comp centre) at frames 0, 5, 10.
 const CAVALRY = {
@@ -58,4 +58,20 @@ test('staticSingleKeys turns one-key animated properties into static values', ()
 	assert.equal(ks.r.a, 1)
 	assert.equal(path.a, 0)
 	assert.ok(!Array.isArray(path.k) && path.k.v)
+})
+
+test('applyMasks puts a world-space mask into each target layer\'s own space', () => {
+	const sq = (x, y) => ({ isClosed: true, points: [[x, y], [x + 10, y], [x + 10, y + 10], [x, y + 10]].map((p) => ({ position: p, inHandle: p, outHandle: p })) })
+	// target moves right 1 px a frame and is scaled 200%; the mask stays put in the world
+	const L = { ind: 2, parent: 1, ks: { p: { a: 1, k: [{ t: 0, s: [0, 0], o: { x: [0], y: [0] }, i: { x: [1], y: [1] } }, { t: 2, s: [2, 0] }] }, s: { a: 0, k: [200, 200] } } }
+	const P = { ind: 1, ks: { p: { a: 0, k: [100, 50] } } }
+	const parentMatrix = (l, t) => { const [a] = [P]; const p = valueAt(a.ks.p, t); return [1, 0, 0, 1, p[0], p[1]] }
+	const n = applyMasks([{ mode: 2, paths: { 0: [sq(100, 50)], 1: [sq(100, 50)], 2: [sq(100, 50)] } }], [L], parentMatrix)
+	assert.equal(n, 1)
+	const m = L.masksProperties[0]
+	assert.equal(m.mode, 'a')
+	assert.equal(m.pt.a, 1, 'mask moves in layer space because the layer moves')
+	assert.deepEqual(m.pt.k[0].s[0].v[1], [5, 0])
+	assert.deepEqual(m.pt.k[2].s[0].v[0], [-1, 0])
+	assert.equal(L.hasMask, true)
 })

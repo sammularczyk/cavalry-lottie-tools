@@ -221,10 +221,67 @@ export function bakePosition(L, world, parentMatrix) {
 	L.ks.p = { s: true, x: { a: 1, k: xs }, y: { a: 1, k: ys } }
 }
 
+// ---------- masks ----------
+// Cavalry's writer drops clipping masks on groups (and their mask shapes). A Lottie mask on a
+// parent layer wouldn't clip its children anyway (parenting only passes the transform), so
+// each mask is rebuilt on every drawing layer under the masked one, in that layer's space.
+
+// Cavalry mask mode (0 union, 1 subtract, 2 intersect = clip) -> Lottie mode for mask i.
+const maskMode = (mode, i) => (mode === 1 ? 's' : i === 0 || mode === 0 ? 'a' : 'i')
+
+// One Lottie shape from a contour of world points: {v, i, o, c} in the layer's space.
+function localShape(contour, M) {
+	const v = [], ii = [], oo = []
+	for (const p of contour.points) {
+		const q = invertApply(M, p.position)
+		if (!q) return null
+		const a = invertApply(M, p.inHandle), b = invertApply(M, p.outHandle)
+		v.push(q)
+		ii.push([a[0] - q[0], a[1] - q[1]])
+		oo.push([b[0] - q[0], b[1] - q[1]])
+	}
+	return { i: ii, o: oo, v, c: !!contour.isClosed }
+}
+
+const sameShape = (a, b) =>
+	a.v.length === b.v.length && ['v', 'i', 'o'].every((f) => a[f].every((p, k) => Math.abs(p[0] - b[f][k][0]) < 0.01 && Math.abs(p[1] - b[f][k][1]) < 0.01))
+
+// masks: [{mode, paths: {frame: [contours in Lottie comp space]}}] for one masked layer;
+// targets: the drawing layers it must clip. Appends Lottie masks to each target.
+export function applyMasks(masks, targets, parentMatrix) {
+	let n = 0
+	for (const L of targets) {
+		const M = (t) => mul(parentMatrix(L, t), layerMatrix(L.ks, t))
+		const out = L.masksProperties ? L.masksProperties.slice() : []
+		masks.forEach((m) => {
+			const frames = Object.keys(m.paths).map(Number).sort((a, b) => a - b)
+			const contours = m.paths[frames[0]].length
+			for (let c = 0; c < contours; c++) {
+				const keys = []
+				for (const t of frames) {
+					const sh = m.paths[t][c] && localShape(m.paths[t][c], M(t))
+					if (sh) keys.push({ t, s: [sh] })
+				}
+				if (!keys.length) continue
+				const still = keys.every((k) => sameShape(k.s[0], keys[0].s[0]))
+				const pt = still ? { a: 0, k: keys[0].s[0] } : { a: 1, k: keys.map((k, j) => (j < keys.length - 1 ? Object.assign(k, { o: { x: 0, y: 0 }, i: { x: 1, y: 1 } }) : k)) }
+				out.push({ inv: false, mode: maskMode(m.mode, out.length), pt, o: { a: 0, k: 100 }, x: { a: 0, k: 0 }, nm: 'Mask' })
+				n++
+			}
+		})
+		if (out.length) {
+			L.masksProperties = out
+			L.hasMask = true
+		}
+	}
+	return n
+}
+
 // World pivot of scene layers at `frames`, in Lottie comp space (top-left, y down).
 // Opens the comp to evaluate it; the caller puts the user's comp and frame back.
-function samplePivots(comp, ids, frames) {
+function samplePivots(comp, ids, frames, maskIds) {
 	const [w, h] = compSize(comp)
+	const toLottie = (p) => [p.x + w / 2, h / 2 - p.y]
 	api.setActiveComp(comp)
 	if (api.getActiveComp() !== comp) throw new Error('Could not open ' + api.getNiceName(comp) + ' to check its layers')
 	const out = {}
@@ -232,12 +289,37 @@ function samplePivots(comp, ids, frames) {
 		api.setFrame(f)
 		for (const id of ids) {
 			try {
-				const p = api.getPivotPosition(id, true)
-				;(out[id] = out[id] || {})[f] = [p.x + w / 2, h / 2 - p.y]
+				;(out[id] = out[id] || {})[f] = toLottie(api.getPivotPosition(id, true))
+			} catch (e) {}
+		}
+		for (const id of maskIds || []) {
+			try {
+				const contours = api.getEditablePath(id, true).map((c) => ({
+					isClosed: c.isClosed,
+					// points without handles carry no inHandle/outHandle
+					points: c.points.map((p) => ({ position: toLottie(p.position), inHandle: toLottie(p.inHandle || p.position), outHandle: toLottie(p.outHandle || p.position) })),
+				}))
+				;(out[id] = out[id] || {})[f] = contours
 			} catch (e) {}
 		}
 	}
 	return out
+}
+
+// Clipping masks on a scene layer: [{id, mode}] (enabled ones only).
+function sceneMasks(id) {
+	return api
+		.getInConnectedAttributes(id)
+		.filter((a) => /^masks\.\d+\.id$/.test(a))
+		.map((a) => {
+			const i = a.split('.')[1]
+			let on = true
+			try {
+				on = api.get(id, 'masks.' + i + '.enabled') !== false
+			} catch (e) {}
+			return on && { id: String(api.getInConnection(id, a)).replace(/\.id$/, ''), mode: api.get(id, 'masks.' + i + '.mode') }
+		})
+		.filter(Boolean)
 }
 
 // Cavalry writes some static values as an animated property with one key, which stops
@@ -288,6 +370,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 	const cache = {}
 	let pivots = 0,
 		baked = 0,
+		maskCount = 0,
 		refs = 0,
 		next = 0
 	const userComp = api.getActiveComp(),
@@ -333,6 +416,10 @@ export function exportWithPrecomps(compId, opts = {}) {
 			sceneOf.set(out, id)
 			return out
 		})
+		// Cavalry's end frame is inclusive, Lottie's op exclusive: layers that run to the comp's
+		// last frame would vanish on it (a one-frame flash each time a precomp loops)
+		const last = api.get(comp, 'endFrame')
+		for (const L of exported.layers) if (L.op === last) L.op = last + 1
 		exported.layers = dropGuides(exported.layers, sceneOf)
 		staticSingleKeys(exported.layers)
 		repair(comp, exported, sceneOf)
@@ -364,6 +451,20 @@ export function exportWithPrecomps(compId, opts = {}) {
 			res.varying.forEach((L) => bakePosition(L, full[sceneOf.get(L)], res.parentMatrix))
 			baked += res.varying.length
 		}
+		// after positions are final: masks the writer dropped, sample their shapes every frame, rebuild on the drawing layers
+		const masked = exported.layers.filter((L) => sceneOf.get(L) && !L.masksProperties).map((L) => [L, sceneMasks(sceneOf.get(L))]).filter((x) => x[1].length)
+		if (masked.length) {
+			const every = []
+			for (let f = start; f <= end; f++) every.push(f)
+			const paths = samplePivots(comp, [], every, [].concat(...masked.map((x) => x[1].map((m) => m.id))))
+			const kids = (L) => exported.layers.filter((q) => q.parent === L.ind)
+			const drawing = (L) => L.ty !== 4 ? L.ty !== 3 : /"ty":"(sh|rc|el|sr)"/.test(JSON.stringify(L.shapes || []))
+			const under = (L) => [L].concat(...kids(L).map(under))
+			for (const [L, ms] of masked) {
+				const withPaths = ms.map((m) => ({ mode: m.mode, paths: paths[m.id] || {} })).filter((m) => Object.keys(m.paths).length)
+				maskCount += applyMasks(withPaths, under(L).filter(drawing), res.parentMatrix)
+			}
+		}
 		api.setFrame(time) // leave the comp showing the frame it was on
 	}
 
@@ -375,5 +476,5 @@ export function exportWithPrecomps(compId, opts = {}) {
 		api.setFrame(userFrame)
 	}
 	json.assets = (json.assets || []).concat(assets)
-	return { json, dirs, warnings, precomps: assets.length, refs, pivots, baked }
+	return { json, dirs, warnings, precomps: assets.length, refs, pivots, baked, masks: maskCount }
 }
