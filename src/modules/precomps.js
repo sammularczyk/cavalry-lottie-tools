@@ -83,6 +83,63 @@ function easeBetween(a, b) {
 	}
 }
 
+// A scene attribute's keyframes as a Lottie property, values through `map`.
+function sceneKeys(id, attr, map) {
+	const ids = api.getKeyframeIdsForAttribute(id, attr)
+	const keys = ids.map((k, j) => {
+		const kf = { t: api.get(k, 'frame'), s: [map(api.get(k, 'data').numValue)] }
+		if (j < ids.length - 1) Object.assign(kf, easeBetween(k, ids[j + 1]))
+		return kf
+	})
+	return keys.length === 1 ? { a: 0, k: keys[0].s[0] } : { a: 1, k: keys }
+}
+
+// Static rotation and scale straight from the scene: the writer sometimes loses them
+// (three of five identical comp references came out unrotated). Animated or driven
+// ones stay as written; positions are corrected afterwards against the scene.
+function sceneRotationScale(L, id) {
+	if (!L.ks) return false
+	const anim = api.getAnimatedAttributes(id) || []
+	const conn = api.getInConnectedAttributes(id) || []
+	const free = (a) => !anim.some((x) => x.indexOf(a) === 0) && !conn.some((x) => x.indexOf(a) === 0)
+	let changed = false
+	try {
+		if (free('rotation') && !isAnimated(L.ks.r)) {
+			const r = -api.get(id, 'rotation').z
+			if (Math.abs(((valueAt(L.ks.r, 0) || [0])[0] || 0) - r) > 1e-4) (L.ks.r = { a: 0, k: r }), (changed = true)
+		}
+		if (free('scale') && !isAnimated(L.ks.s)) {
+			const sc = api.get(id, 'scale')
+			const want = [sc.x * 100, sc.y * 100, 100]
+			const cur = valueAt(L.ks.s, 0) || [100, 100]
+			if (Math.abs(cur[0] - want[0]) > 1e-4 || Math.abs(cur[1] - want[1]) > 1e-4) (L.ks.s = { a: 0, k: want }), (changed = true)
+		}
+	} catch (e) {}
+	return changed
+}
+
+// The writer drops opacity on groups (static 100 or its animation): take it from the scene.
+function sceneOpacity(L, id) {
+	if (!L.ks) return false
+	const animated = (api.getAnimatedAttributes(id) || []).indexOf('opacity') >= 0
+	if (animated) {
+		L.ks.o = sceneKeys(id, 'opacity', (v) => v)
+		return true
+	}
+	if ((api.getInConnectedAttributes(id) || []).indexOf('opacity') >= 0) return false // ponytail: driven opacity isn't sampled yet
+	let v
+	try {
+		v = api.get(id, 'opacity')
+	} catch (e) {
+		return false
+	}
+	if (typeof v !== 'number') return false
+	const cur = (valueAt(L.ks.o, 0) || [100])[0]
+	if (isAnimated(L.ks.o) || Math.abs(cur - v) < 1e-6) return false
+	L.ks.o = { a: 0, k: v }
+	return true
+}
+
 // timeRemapping is % of the referenced comp's length (100% = its end frame); Lottie tm is seconds.
 // Its keys are in the parent's time, like every other layer key in Lottie.
 function timeRemap(ref, comp, fps) {
@@ -342,6 +399,40 @@ export function staticSingleKeys(node) {
 	return n
 }
 
+// Cavalry children inherit their parents' opacity; Lottie children don't (parenting only
+// passes the transform). Fold each layer's ancestors' opacity into its own: a constant
+// factor when they're static, otherwise one key per frame over [from, to].
+export function inheritOpacity(layers, from, to) {
+	const byInd = new Map(layers.map((L) => [L.ind, L]))
+	const opacity = (L) => (L.ks && L.ks.o) || { a: 0, k: 100 }
+	const hasHold = (p) => isAnimated(p) && p.k.some((k) => k.h === 1)
+	let n = 0
+	for (const L of layers) {
+		const chain = []
+		for (let q = byInd.get(L.parent); q; q = byInd.get(q.parent)) {
+			const o = opacity(q)
+			if (isAnimated(o) || (valueAt(o, 0) || [100])[0] !== 100) chain.push(o)
+		}
+		if (!chain.length) continue
+		const own = opacity(L)
+		const all = [own].concat(chain)
+		const at = (t) => all.reduce((v, o) => (v * (valueAt(o, t) || [100])[0]) / 100, 100)
+		if (!all.some(isAnimated)) L.ks.o = { a: 0, k: at(0) }
+		else {
+			const step = all.some(hasHold)
+			const keys = []
+			for (let t = from; t <= to; t++) {
+				const kf = { t, s: [at(t)] }
+				if (t < to) Object.assign(kf, step ? { h: 1 } : { o: { x: [0], y: [0] }, i: { x: [1], y: [1] } })
+				keys.push(kf)
+			}
+			L.ks.o = { a: 1, k: keys }
+		}
+		n++
+	}
+	return n
+}
+
 // Guide layers (and everything under them) aren't rendered by Cavalry, but its writer exports them.
 function isGuide(id) {
 	for (let q = id; q; q = api.getParent(q)) {
@@ -422,6 +513,13 @@ export function exportWithPrecomps(compId, opts = {}) {
 		for (const L of exported.layers) if (L.op === last) L.op = last + 1
 		exported.layers = dropGuides(exported.layers, sceneOf)
 		staticSingleKeys(exported.layers)
+		for (const L of exported.layers) {
+			const id = sceneOf.get(L)
+			if (!id) continue
+			sceneRotationScale(L, id)
+			if (L.ty !== 0) sceneOpacity(L, id)
+		}
+		inheritOpacity(exported.layers, api.get(comp, 'startFrame'), last)
 		repair(comp, exported, sceneOf)
 		return exported
 	}

@@ -75,3 +75,21 @@ test('applyMasks puts a world-space mask into each target layer\'s own space', (
 	assert.deepEqual(m.pt.k[2].s[0].v[0], [-1, 0])
 	assert.equal(L.hasMask, true)
 })
+
+test('inheritOpacity folds parent opacity into children (Lottie parents only pass transforms)', async () => {
+	const { inheritOpacity } = await import('../src/modules/precomps.js')
+	const hold = { a: 1, k: [{ t: 0, s: [100], h: 1 }, { t: 3, s: [0], h: 1 }, { t: 6, s: [0] }] }
+	const layers = [
+		{ ind: 1, ks: { o: hold } },
+		{ ind: 2, parent: 1, ks: { o: { a: 0, k: 50 } } },
+		{ ind: 3, parent: 2, ks: {} },
+		{ ind: 4, ks: { o: { a: 0, k: 40 } } },
+		{ ind: 5, parent: 4, ks: { o: { a: 0, k: 50 } } },
+	]
+	assert.equal(inheritOpacity(layers, 0, 6), 3)
+	const o3 = layers[2].ks.o
+	assert.equal(o3.a, 1)
+	assert.deepEqual(o3.k.map((k) => k.s[0]), [50, 50, 50, 0, 0, 0, 0])
+	assert.equal(o3.k[0].h, 1, 'hold keys stay steps')
+	assert.deepEqual(layers[4].ks.o, { a: 0, k: 20 })
+})
