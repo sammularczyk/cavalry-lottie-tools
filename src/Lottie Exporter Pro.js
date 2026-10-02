@@ -1,10 +1,10 @@
 // Lottie Exporter Pro
 // Exports a comp with Cavalry's own Lottie writer, then optimises the JSON with
 // selectable passes. Also optimises any existing Lottie file.
-// Player preflight, lossy passes and asset embedding come next.
+// Player preflight and asset embedding come next.
 
 import { PASSES, optimise } from './modules/passes.js'
-import { getTokens } from './modules/ui/theme.js'
+import { theme, label, section, button, toggleRow, list } from './modules/ui/kit.js'
 import { checkForUpdate } from './modules/updateChecker.js'
 import { exportComp, copyImages, BAKE_MODES } from './modules/cavalryExport.js'
 
@@ -42,54 +42,40 @@ function save() {
 
 // ---------- widgets ----------
 
-var tokens = getTokens()
+var T = theme()
 
-function sectionLabel(text) {
-	var label = new ui.Label(text.toUpperCase())
-	label.setFontSize(11)
-	label.setTextColor(tokens.textMuted)
-	return label
-}
-
-function checkRow(text, tooltip, key) {
-	var row = new ui.HLayout()
-	var cb = new ui.Checkbox(!!settings[key])
-	cb.setToolTip(tooltip || text)
-	cb.onValueChanged = function () {
-		settings[key] = cb.getValue()
-		save()
-	}
-	var label = new ui.Label(text)
-	label.setToolTip(tooltip || text)
-	row.add(cb)
-	row.add(label)
-	row.addStretch()
-	return row
-}
-
+// Tooltip (long) and row detail (one short line) per pass.
 var TIPS = {
-	removeHidden: 'Hidden layers and shapes (hd). Parents and matte sources are kept.',
-	removeDeadLayers: 'Layers with an empty time range or opacity 0 the whole time.',
-	removeUnusedAssets: 'Images and precomps no layer refers to.',
-	dedupeAssets: 'Identical precomps or images become one asset.',
-	trimToLayerRange: 'Keyframes outside each layer’s in/out range, keeping one on each side.',
-	collapseStatic: 'Animated properties whose keys all hold the same value.',
-	removeRedundantKeys: 'Keys inside a constant run, or exactly on a straight line.',
-	trimKeyframeFields: 'Tangents on hold and last keys, and legacy end values.',
-	unwrapScalars: 'Store [5] as 5 on static values.',
-	stripMeta: 'ln, cl, meta and effect match names.',
-	removeIdentityNulls: 'Null layers that do not move anything (Cavalry adds one per comp).',
-	removeDefaults: 'Zero skew, auto-orient off, empty names.',
-	recoverRigidMotion: 'Baked duplicator/deformer copies that only move, turn or scale keep one path and animate their transform instead. Biggest saving on baked scenes.',
-	simplifyKeys: 'Drops baked keys that lie within a fraction of a pixel (or degree, or %) of a straight line between their neighbours.',
-	roundPrecision: 'Positions and paths to 0.01 px, opacity to 0.1, colours to 0.001.',
+	removeHidden: ['Hidden layers and shapes (hd). Parents and matte sources are kept.', 'Hidden layers and shapes'],
+	removeDeadLayers: ['Layers with an empty time range or opacity 0 the whole time.', 'Never on screen'],
+	removeIdentityNulls: ['Null layers that do not move anything (Cavalry adds one per comp).', 'Nulls that move nothing'],
+	removeUnusedAssets: ['Images and precomps no layer refers to.', 'Nothing refers to them'],
+	dedupeAssets: ['Identical precomps or images become one asset.', 'Identical precomps and images'],
+	trimToLayerRange: ['Keyframes outside each layer’s in/out range, keeping one on each side.', 'Keys outside each layer’s range'],
+	collapseStatic: ['Animated properties whose keys all hold the same value.', 'Keys that all hold one value'],
+	removeRedundantKeys: ['Keys inside a constant run, or exactly on a straight line.', 'Keys that change nothing'],
+	trimKeyframeFields: ['Tangents on hold and last keys, legacy end values; linear eases written short.', 'Unused tangents and end values'],
+	removeDefaults: ['Zero skew, auto-orient off, empty names.', 'Zero skew, empty names'],
+	unwrapScalars: ['Store [5] as 5 on static values.', '[5] → 5'],
+	stripMeta: ['ln, cl, meta and effect match names.', 'ln, cl, meta, match names'],
+	recoverRigidMotion: ['Baked duplicator/deformer copies that only move, turn or scale keep one path and animate their transform instead. Biggest saving on baked scenes.', 'Baked copies → one path + transform'],
+	simplifyKeys: ['Drops baked keys that lie within a fraction of a pixel (or degree, or %) of a straight line between their neighbours.', 'Baked keys within ¼ px of a line'],
+	roundPrecision: ['Positions and paths to 0.01 px, opacity to 0.1, colours to 0.001.', '0.01 px, 0.1 opacity, 0.001 colour'],
 }
 
-var layout = new ui.VLayout()
-layout.setMargins(8, 8, 8, 8)
+function optionRow(key, title, tip, detail) {
+	return toggleRow(title, detail, settings[key], T, function (on) {
+		settings[key] = on
+		save()
+	}, tip).widget
+}
 
-// Export section: comp + bake override
-layout.add(sectionLabel('Export'))
+var root = new ui.VLayout()
+root.setMargins(4, 4, 4, 4)
+root.setSpaceBetween(8)
+
+// export: comp, bake override, the main action
+root.add(section('Export', T))
 var compDrop = new ui.DropDown()
 var compIds = []
 function refreshComps() {
@@ -103,6 +89,15 @@ function refreshComps() {
 	if (i >= 0) compDrop.setValue(i)
 }
 refreshComps()
+var compRow = new ui.HLayout()
+compRow.setSpaceBetween(6)
+compRow.add(compDrop)
+var refresh = button('↻', false, refreshComps, T)
+refresh.widget.setFixedWidth(30)
+refresh.widget.setToolTip('Refresh the comp list')
+compRow.add(refresh.widget)
+root.add(compRow)
+
 var bakeDrop = new ui.DropDown()
 bakeDrop.addEntry('Bake: as set on each layer')
 BAKE_MODES.forEach(function (m) {
@@ -114,38 +109,49 @@ bakeDrop.onValueChanged = function () {
 	settings.bakeMode = bakeDrop.getValue()
 	save()
 }
-var compRow = new ui.HLayout()
-compRow.add(compDrop)
-var refresh = new ui.Button('↻')
-refresh.setToolTip('Refresh the comp list')
-refresh.onClick = refreshComps
-compRow.add(refresh)
-layout.add(compRow)
-layout.add(bakeDrop)
-var exportButton = new ui.Button('Export comp…')
-layout.add(exportButton)
-layout.addSpacing(6)
+root.add(bakeDrop)
+var exportBtn = button('Export comp…', true, function () {
+	guarded(runExport)
+}, T)
+root.add(exportBtn.widget)
 
+// optimisation passes, grouped, in a recessed list
+var optHead = section('Optimise', T)
+root.add(optHead)
+var opts = list(300, T)
 ;['lossless', 'lossy'].forEach(function (group) {
-	layout.add(sectionLabel(group === 'lossy' ? 'Lossy (within a fraction of a pixel)' : 'Lossless'))
+	opts.layout.add(label(group === 'lossy' ? 'Lossy · within a fraction of a pixel' : 'Lossless', 10, T.muted))
 	PASSES.forEach(function (p) {
-		if (p.group === group) layout.add(checkRow(p.label, TIPS[p.id], p.id))
+		if (p.group === group) opts.layout.add(optionRow(p.id, p.label, TIPS[p.id][0], TIPS[p.id][1]))
 	})
-	layout.addSpacing(4)
 })
-layout.add(checkRow('Strip layer and shape names', 'Keeps names that expressions refer to. Leave off if apps look layers up by name (iOS/Android KeyPaths).', 'stripNames'))
-layout.addSpacing(6)
-layout.add(sectionLabel('Output'))
-layout.add(checkRow('Short number format (1e-6, 123e5)', 'Writes very small and very large numbers in exponent form.', 'exponent'))
-layout.add(checkRow('Pretty print', 'Indented JSON for reading; much larger.', 'pretty'))
-layout.addSpacing(8)
+opts.layout.add(label('Output', 10, T.muted))
+opts.layout.add(optionRow('stripNames', 'Strip layer and shape names', 'Keeps names that expressions refer to. Leave off if apps look layers up by name (iOS/Android KeyPaths).', 'Breaks name lookups in apps'))
+opts.layout.add(optionRow('exponent', 'Short number format', 'Writes very small and very large numbers in exponent form.', '0.000001 → 1e-6'))
+opts.layout.add(optionRow('pretty', 'Pretty print', 'Indented JSON for reading; much larger.', 'Readable, much larger'))
+opts.layout.addStretch()
+root.add(opts.widget)
 
-var button = new ui.Button('Optimise existing file…')
-var status = new ui.Label('Optimising an existing file writes <name>.min.json next to it.')
-status.setTextColor(tokens.textMuted)
-layout.add(button)
-layout.add(status)
-layout.addStretch()
+var optimiseBtn = button('Optimise existing file…', false, function () {
+	guarded(run)
+}, T)
+root.add(optimiseBtn.widget)
+
+var status = label('Optimising an existing file writes <name>.min.json next to it.', 11, T.muted)
+root.add(status)
+root.addStretch()
+
+function guarded(fn) {
+	ui.setCallbacksActive(false) // no hover/click callbacks into the panel while work runs
+	try {
+		fn()
+	} catch (e) {
+		status.setText('Failed: ' + ((e && e.message) || e))
+		console.error(SCRIPT_NAME + ': ' + ((e && e.stack) || e))
+	} finally {
+		ui.setCallbacksActive(true)
+	}
+}
 
 // ---------- run ----------
 
@@ -214,11 +220,8 @@ function runExport() {
 	optimiseAndWrite(exported.json, out, extra)
 }
 
-button.onClick = run
-exportButton.onClick = runExport
-
 ui.setTitle(SCRIPT_NAME)
-ui.add(layout)
+ui.add(root)
 ui.setMinimumWidth(320)
 ui.show()
 
