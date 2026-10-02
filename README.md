@@ -3,7 +3,7 @@
 Lottie import and export for [Cavalry](https://cavalry.studio).
 
 - **Lottie Importer**: opens Lottie `.json` files as native Cavalry layers.
-- **Lottie Optimiser**: wraps Cavalry's own Lottie export, then checks the result against each target player, optimises it, embeds assets and packages it as `.json` or `.lottie`.
+- **Lottie Optimiser**: Export Cavalry comps to Lottie with even higher fidelity and lower file size than the defauly exporter. Customise the settings to get them even smaller, and validate your files against the different runtimes.
 
 ## Install
 Copy the `.jsc` scripts into Cavalry's Scripts folder.
@@ -17,3 +17,6 @@ npm run dev      # watch build, symlinked into Cavalry's Scripts folder
 npm test         # Node tests for the pure JSON passes
 npm run release  # builds and copies the .jsc files to the repo root
 ```
+
+## License
+MIT
