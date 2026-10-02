@@ -92,8 +92,8 @@ importButton.onClick = function() {
     var startPath = api.getProjectPath() || api.getDesktopFolder();
     var filePath = api.presentOpenFile(
         startPath,
-        "Import Lottie JSON",
-        "JSON File (*.json)"
+        "Import Lottie",
+        "Lottie (*.json *.lottie)"
     );
 
     if (!filePath || filePath === "") {
@@ -103,7 +103,9 @@ importButton.onClick = function() {
 
     var jsonString;
     try {
-        jsonString = api.readFromFile(filePath);
+        var source = readLottieSource(filePath);
+        jsonString = source.json;
+        lottieSourceDir = source.dir;
     } catch (e) {
         statusLabel.setText("Failed to read file: " + e.message);
         return;
@@ -147,6 +149,43 @@ checkForUpdate(GITHUB_REPO, scriptName, currentVersion, function(updateAvailable
 ui.show();
 
 // --- Lottie parsing and layer source ---
+
+// Folder that external image assets (asset.u + asset.p) resolve against.
+var lottieSourceDir = null;
+
+// .json -> its text; .lottie (dotLottie v1 "animations/" or v2 "a/") -> unzip to temp, first animation.
+function readLottieSource(filePath) {
+    var dir = api.getFolderFromPath(filePath);
+    if (!/\.lottie$/i.test(filePath)) return { json: api.readFromFile(filePath), dir: dir };
+    var root = api.getTempFolder() + "/LottieImport_" + new Date().getTime();
+    api.unzip(filePath, root);
+    var manifest = {};
+    try { manifest = JSON.parse(api.readFromFile(root + "/manifest.json")); } catch (e) {}
+    var anims = manifest.animations || [];
+    var id = anims.length ? anims[0].id : null;
+    var candidates = id ? [root + "/a/" + id + ".json", root + "/animations/" + id + ".json"] : [];
+    ["a", "animations"].forEach(function(sub) {
+        var folder = root + "/" + sub;
+        if (!api.filePathExists(folder)) return;
+        api.listDirectory(folder).forEach(function(f) { if (/\.json$/i.test(f)) candidates.push(f.indexOf("/") >= 0 ? f : folder + "/" + f); });
+    });
+    for (var i = 0; i < candidates.length; i++) {
+        if (api.filePathExists(candidates[i])) return { json: api.readFromFile(candidates[i]), dir: root };
+    }
+    throw new Error("no animation found in " + api.getFileNameFromPath(filePath));
+}
+
+// External image: try u+p as written, then the usual Bodymovin / dotLottie folders.
+function resolveExternalImage(asset) {
+    if (!asset.p || !lottieSourceDir) return null;
+    if (/^(\/|[A-Za-z]:)/.test(asset.p) && api.filePathExists(asset.p)) return asset.p;
+    var tries = [(asset.u || "") + asset.p, "images/" + asset.p, "i/" + asset.p, asset.p];
+    for (var i = 0; i < tries.length; i++) {
+        var f = (lottieSourceDir + "/" + tries[i]).replace(/\/+/g, "/");
+        if (api.filePathExists(f)) return f;
+    }
+    return null;
+}
 
 function getCompInfo(lottie) {
     return {
@@ -555,7 +594,7 @@ function applyGradientFill(shapeId, gradInfo, scaleFactor, yFlip, groupOffset) {
 
 // --- Lottie blend mode to Cavalry enum mapping ---
 var LOTTIE_BLEND_MODE_MAP = [
-    0,  // 0: Normal -> 0
+    3,  // 0: Normal -> 3 (Cavalry ignores 0)
     24, // 1: Multiply -> 24
     14, // 2: Screen -> 14
     15, // 3: Overlay -> 15
@@ -570,18 +609,18 @@ var LOTTIE_BLEND_MODE_MAP = [
     25, // 12: Hue -> 25
     26, // 13: Saturation -> 26
     27, // 14: Color -> 27
-    28  // 15: Luminosity -> 28
+    28, // 15: Luminosity -> 28
+    12  // 16: Add -> Plus Lighter
 ];
 
 function lottieBlendModeToCavalry(bm) {
-    if (bm == null || bm === 0) return 0;
     if (bm >= 0 && bm < LOTTIE_BLEND_MODE_MAP.length) return LOTTIE_BLEND_MODE_MAP[bm];
-    return 0;
+    return 3;
 }
 
 function applyBlendModeToNode(nodeId, bm) {
     var cavEnum = lottieBlendModeToCavalry(bm);
-    if (cavEnum !== 0) {
+    if (cavEnum !== 3) {
         try { api.set(nodeId, { "blendMode": cavEnum }); } catch (e) {}
     }
 }
@@ -1470,27 +1509,11 @@ function evalCubic(p0, c0, c1, p1, t) {
     return mt * mt * mt * p0 + 3 * mt * mt * t * c0 + 3 * mt * t * t * c1 + t * t * t * p1;
 }
 
-// Map normalized t through Lottie temporal ease to get parametric u.
-// Lottie temporal ease: cubic bezier from (0,0) to (1,1) with control points
-// (ox, oy) and (ix, iy). We approximate by sampling and finding the t that
-// gives the requested u on the x-axis, then return the y value.
+// Map normalized time t through a Lottie temporal ease (cubic bezier (0,0),(ox,oy),(ix,iy),(1,1)).
 function evalTemporalEase(ox, oy, ix, iy, t) {
     if (t <= 0) return 0;
     if (t >= 1) return 1;
-    var best = t;
-    var bestDist = 999;
-    for (var s = 0; s <= 20; s++) {
-        var u = s / 20;
-        var mu = 1 - u;
-        var bx = 3 * mu * mu * u * ox + 3 * mu * u * u * ix + u * u * u;
-        var dist = Math.abs(bx - t);
-        if (dist < bestDist) {
-            bestDist = dist;
-            best = u;
-        }
-    }
-    var mu2 = 1 - best;
-    return 3 * mu2 * mu2 * best * oy + 3 * mu2 * best * best * iy + best * best * best;
+    return cbVal(0, oy, iy, 1, solveCbX(ox, ix, t));
 }
 
 // --- Apply Lottie bezier easing to Cavalry keyframe tangents ---
@@ -1507,6 +1530,12 @@ function evalTemporalEase(ox, oy, ix, iy, t) {
 // Lottie stores normalized cubic-bezier per segment:
 //   kf[n].o = outgoing P1 {x:[...], y:[...]}
 //   kf[n].i = incoming P2 {x:[...], y:[...]}
+// Lottie ease tangents are a number or a per-component array; scalars store one entry.
+function easeComponent(v, ci, fallback) {
+    if (Array.isArray(v)) v = v[ci] != null ? v[ci] : v[0];
+    return v != null ? v : fallback;
+}
+
 function applyLottieEasing(nodeId, attr, cavalryKfs, lottieKfs, component) {
     if (!cavalryKfs || cavalryKfs.length < 2 || !lottieKfs) return;
     var ci = (component != null) ? component : 0;
@@ -1529,8 +1558,8 @@ function applyLottieEasing(nodeId, attr, cavalryKfs, lottieKfs, component) {
         var frameDiff = nxtFrame - curFrame;
         var valueDiff = nxtValue - curValue;
 
-        var x1 = Array.isArray(lkf.o.x) ? lkf.o.x[ci] : (lkf.o.x || 0);
-        var y1 = Array.isArray(lkf.o.y) ? lkf.o.y[ci] : (lkf.o.y || 0);
+        var x1 = easeComponent(lkf.o.x, ci, 0);
+        var y1 = easeComponent(lkf.o.y, ci, 0);
         var outHX = x1 * frameDiff;
         var outHY = y1 * valueDiff;
         try {
@@ -1544,8 +1573,8 @@ function applyLottieEasing(nodeId, attr, cavalryKfs, lottieKfs, component) {
         } catch (e) {}
 
         if (lkf.i) {
-            var x2 = Array.isArray(lkf.i.x) ? lkf.i.x[ci] : (lkf.i.x || 1);
-            var y2 = Array.isArray(lkf.i.y) ? lkf.i.y[ci] : (lkf.i.y || 1);
+            var x2 = easeComponent(lkf.i.x, ci, 1);
+            var y2 = easeComponent(lkf.i.y, ci, 1);
             var inHX = (x2 - 1) * frameDiff;
             var inHY = (y2 - 1) * valueDiff;
             try {
@@ -2700,7 +2729,7 @@ function createImageLayer(layer, assets, name, yFlip, scaleFactor, compW, compH)
     api.set(nodeId, { "generator.dimensions": [imgW * scaleFactor, imgH * scaleFactor] });
     var b64Data = null;
     var ext = "png";
-    if (asset.e === 1 && asset.p) {
+    if (asset.p && /^data:/i.test(asset.p)) {
         var m = /^data:([^;]+);base64,(.*)$/i.exec(asset.p);
         if (m) {
             var mime = m[1].toLowerCase();
@@ -2716,55 +2745,40 @@ function createImageLayer(layer, assets, name, yFlip, scaleFactor, compW, compH)
         else if (b64Data.indexOf("UklGR") === 0) ext = "webp";
         else if (b64Data.indexOf("R0lGOD") === 0) ext = "gif";
     }
-    if (b64Data) {
-        try {
-            var fileName = (asset.id || "img") + "." + ext;
-            var filePath = null;
-            var assetsPath = api.getAssetPath ? api.getAssetPath() : null;
-            if (assetsPath) {
-                var lottieFolderPath = assetsPath + "/Lottie";
-                _ensureLottieDir(lottieFolderPath);
-                filePath = lottieFolderPath + "/" + fileName;
-            }
-            if (!filePath && api.getTempFolder) {
-                var tmpFolder = api.getTempFolder() + "/Lottie";
-                _ensureLottieDir(tmpFolder);
-                filePath = tmpFolder + "/" + fileName;
-            }
-            if (filePath) {
-                var wrote = false;
-                try { if (api.writeEncodedToBinaryFile) { wrote = !!api.writeEncodedToBinaryFile(filePath, b64Data); } } catch (eEnc) { wrote = false; }
-                if (!wrote) {
-                    try { if (api.writeFile) { api.writeFile(filePath, b64Data, { encoding: "base64" }); wrote = true; } } catch (eWF) { wrote = false; }
-                }
-                if (wrote) {
-                    var fileAssetId = null;
-                    try { if (api.loadAsset) fileAssetId = api.loadAsset(filePath, false); } catch (eLoad) { fileAssetId = null; }
-                    if (!fileAssetId) { try { if (api.importAsset) fileAssetId = api.importAsset(filePath); } catch (eImp) { fileAssetId = null; } }
-                    if (fileAssetId) {
-                        var shaderId = api.create("imageShader", name + " Shader");
-                        try { api.connect(fileAssetId, "id", shaderId, "image"); } catch (eCon) {}
-                        api.connect(shaderId, "id", nodeId, "material.colorShaders");
-                        api.parent(shaderId, nodeId);
-                        api.set(nodeId, { "material.materialColor.a": 0 });
-                        if (!lottieAssetGroupId) {
-                            try { lottieAssetGroupId = api.createAssetGroup("Lottie Assets"); } catch (eGrp) {}
-                        }
-                        if (lottieAssetGroupId) {
-                            try { api.parent(fileAssetId, lottieAssetGroupId); } catch (ePar) {}
-                        }
-                    } else {
-                        console.log("Lottie Importer: Could not load image asset: " + filePath);
-                    }
-                } else {
-                    console.log("Lottie Importer: Could not write image file: " + filePath);
-                }
-            }
-        } catch (e) {
-            console.log("Lottie Importer: Image decode failed: " + (e && e.message ? e.message : String(e)));
-        }
+    var filePath = b64Data ? writeEmbeddedImage(asset, b64Data, ext) : resolveExternalImage(asset);
+    if (!filePath) {
+        console.log("Lottie Importer: Image not found for asset " + (asset.id || "?") + " (" + (asset.u || "") + (b64Data ? "embedded" : asset.p) + ")");
+        return nodeId;
+    }
+    var fileAssetId = null;
+    try { fileAssetId = api.loadAsset(filePath, false); } catch (eLoad) { fileAssetId = null; }
+    if (!fileAssetId) {
+        console.log("Lottie Importer: Could not load image asset: " + filePath);
+        return nodeId;
+    }
+    var shaderId = api.create("imageShader", name + " Shader");
+    try { api.connect(fileAssetId, "id", shaderId, "image"); } catch (eCon) {}
+    api.connect(shaderId, "id", nodeId, "material.colorShaders");
+    api.parent(shaderId, nodeId);
+    api.set(nodeId, { "material.materialColor.a": 0 });
+    if (!lottieAssetGroupId) {
+        try { lottieAssetGroupId = api.createAssetGroup("Lottie Assets"); } catch (eGrp) {}
+    }
+    if (lottieAssetGroupId) {
+        try { api.parent(fileAssetId, lottieAssetGroupId); } catch (ePar) {}
     }
     return nodeId;
+}
+
+// Decode a data: URI image into the project's assets folder (or temp), returning its path.
+function writeEmbeddedImage(asset, b64Data, ext) {
+    var assetsPath = api.getAssetPath ? api.getAssetPath() : null;
+    var folder = (assetsPath ? assetsPath : api.getTempFolder()) + "/Lottie";
+    _ensureLottieDir(folder);
+    var filePath = folder + "/" + (asset.id || "img") + "." + ext;
+    try { if (api.writeEncodedToBinaryFile(filePath, b64Data)) return filePath; } catch (e) {}
+    console.log("Lottie Importer: Could not write image file: " + filePath);
+    return null;
 }
 
 // --- Create a Text Layer (ty=5) ---
