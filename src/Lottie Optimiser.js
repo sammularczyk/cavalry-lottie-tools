@@ -1,4 +1,4 @@
-// Lottie Exporter Pro
+// Lottie Optimiser
 // Preflight: checks a comp (or any Lottie file) against the players you target.
 // Export: exports a comp with Cavalry's own Lottie writer, then optimises the JSON with
 // selectable passes. Also optimises any existing Lottie file.
@@ -11,8 +11,8 @@ import { exportComp, copyImages, BAKE_MODES } from './modules/cavalryExport.js'
 import { exportWithPrecomps } from './modules/precomps.js'
 
 var GITHUB_REPO = 'phillip-motion/cavalry-lottie-tools' // ponytail: confirm owner before first release
-var SCRIPT_NAME = 'Lottie Exporter Pro'
-var PREF_KEY = 'lottieTools_exporter'
+var SCRIPT_NAME = 'Lottie Optimiser'
+var PREF_KEY = 'lottieTools_exporter' // old key kept so saved settings carry over
 
 // ---------- settings ----------
 

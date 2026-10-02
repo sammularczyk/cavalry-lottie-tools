@@ -3,7 +3,7 @@
 Lottie import and export for [Cavalry](https://cavalry.studio).
 
 - **Lottie Importer**: opens Lottie `.json` files as native Cavalry layers.
-- **Lottie Exporter Pro** (in progress): wraps Cavalry's own Lottie export, then checks the result against each target player, optimises it, embeds assets and packages it as `.json` or `.lottie`.
+- **Lottie Optimiser**: wraps Cavalry's own Lottie export, then checks the result against each target player, optimises it, embeds assets and packages it as `.json` or `.lottie`.
 
 ## Develop
 ```
