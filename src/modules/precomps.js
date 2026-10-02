@@ -118,6 +118,83 @@ function sceneRotationScale(L, id) {
 	return changed
 }
 
+// Lottie properties a scene attribute was written to, on one exported layer.
+function lottieProps(L, attr) {
+	const ks = L.ks || {}
+	const first = (ty) => {
+		const walk = (items) => {
+			for (const it of items || []) {
+				if (it.ty === ty) return it
+				if (it.ty === 'gr') {
+					const r = walk(it.it)
+					if (r) return r
+				}
+			}
+		}
+		return walk(L.shapes)
+	}
+	const sub = (ty, f) => {
+		const it = first(ty)
+		return it && it[f] ? [it[f]] : []
+	}
+	switch (attr) {
+		case 'opacity':
+			return ks.o ? [ks.o] : []
+		case 'position.x':
+			return ks.p && ks.p.s ? [ks.p.x] : ks.p ? [ks.p] : []
+		case 'position.y':
+			return ks.p && ks.p.s ? [ks.p.y] : ks.p ? [ks.p] : []
+		case 'rotation.z':
+			return ks.r ? [ks.r] : []
+		case 'scale.x':
+		case 'scale.y':
+			return ks.s ? [ks.s] : []
+		case 'stroke.width':
+			return sub('st', 'w')
+		case 'stroke.alpha':
+			return sub('st', 'o')
+		case 'material.alpha':
+			return sub('fl', 'o')
+		case 'stroke.trimStart':
+			return sub('tm', 's')
+		case 'stroke.trimEnd':
+			return sub('tm', 'e')
+		case 'stroke.trimTravel':
+			return sub('tm', 'o')
+		case 'inputPath':
+			return sub('sh', 'ks')
+		default:
+			return []
+	}
+}
+
+// The writer drops hold (step) interpolation: a value Cavalry holds and then snaps
+// (the dreidel lines' stroke width) fades across the gap instead. Hold the Lottie key
+// wherever the scene key is a hold.
+function sceneHolds(L, id) {
+	let n = 0
+	for (const attr of api.getAnimatedAttributes(id) || []) {
+		const props = lottieProps(L, attr).filter(isAnimated)
+		if (!props.length) continue
+		const holds = new Set(
+			api
+				.getKeyframeIdsForAttribute(id, attr)
+				.filter((k) => (api.get(k, 'data') || {}).interpolation === 2)
+				.map((k) => api.get(k, 'frame'))
+		)
+		if (!holds.size) continue
+		for (const p of props)
+			p.k.forEach((kf, j) => {
+				if (j === p.k.length - 1 || kf.h === 1 || !holds.has(Math.round(kf.t))) return
+				kf.h = 1
+				delete kf.i
+				delete kf.o
+				n++
+			})
+	}
+	return n
+}
+
 // The writer drops opacity on groups (static 100 or its animation): take it from the scene.
 function sceneOpacity(L, id) {
 	if (!L.ks) return false
@@ -518,6 +595,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 			if (!id) continue
 			sceneRotationScale(L, id)
 			if (L.ty !== 0) sceneOpacity(L, id)
+			sceneHolds(L, id)
 		}
 		inheritOpacity(exported.layers, api.get(comp, 'startFrame'), last)
 		repair(comp, exported, sceneOf)
