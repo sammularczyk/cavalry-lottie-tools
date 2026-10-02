@@ -472,6 +472,41 @@ export function foldStaticParents(json) {
 	return n
 }
 
+// A shape group's transform item is the identity (and it isn't faded).
+function identityTr(tr) {
+	if (!tr) return true
+	const is = (p, d) => !p || (!isAnimated(p) && !p.x && asArray(p.k).every((v, i) => Math.abs(v - (d[i] != null ? d[i] : d[0])) < EPS))
+	return is(tr.p, [0, 0]) && is(tr.a, [0, 0]) && is(tr.s, [100, 100]) && is(tr.r, [0]) && is(tr.o, [100]) && is(tr.sk, [0]) && !tr.rx && !tr.ry && !tr.rz
+}
+
+// Cavalry wraps every path in groups inside groups, each with a full transform. A group
+// that is the only item at its level (besides an identity transform) and whose own
+// transform is the identity can give its items to the level above: fills, strokes and
+// modifiers still apply to exactly the same paths, in the same order, so nothing drawn
+// or animated changes.
+export function flattenShapeGroups(json) {
+	let n = 0
+	// top: the layer's own shape list, which has no transform item to take a group's over
+	const flatten = (items, top) => {
+		if (!Array.isArray(items)) return items
+		for (const it of items) if (it && it.ty === 'gr') it.it = flatten(it.it, false)
+		for (;;) {
+			const rest = items.filter((it) => it.ty !== 'tr')
+			const ownTr = items.find((it) => it.ty === 'tr')
+			if (rest.length !== 1 || rest[0].ty !== 'gr' || !identityTr(ownTr)) return items
+			const g = rest[0]
+			if (g.hd || (g.bm && g.bm !== 0) || !Array.isArray(g.it)) return items
+			const inner = g.it.find((it) => it.ty === 'tr')
+			if (identityTr(inner)) items = g.it.filter((it) => it.ty !== 'tr').concat(ownTr ? [ownTr] : [])
+			else if (!top) items = g.it.slice() // this level's transform is the identity: the inner one replaces it
+			else return items
+			n++
+		}
+	}
+	for (const layers of layerLists(json)) for (const L of layers) if (Array.isArray(L.shapes)) L.shapes = flatten(L.shapes, true)
+	return n
+}
+
 // Names that expressions look up ("thisComp.layer('Name')", effect('Slider'), ...).
 function namesUsedByExpressions(json) {
 	const names = new Set()
@@ -934,6 +969,7 @@ export const PASSES = [
 	{ id: 'simplifyKeys', label: 'Simplify keyframes within tolerance', group: 'lossy', on: true, run: simplifyKeys },
 	{ id: 'roundPrecision', label: 'Round values (decimals per kind)', group: 'lossy', on: true, run: roundPrecision },
 	{ id: 'instanceLayers', label: 'Share identical layers as one precomp', group: 'lossless', on: true, run: instanceLayers },
+	{ id: 'flattenShapeGroups', label: 'Flatten nested shape groups', group: 'lossless', on: true, run: flattenShapeGroups },
 	{ id: 'collapseStatic', label: 'Make unchanging animated properties static', group: 'lossless', on: true, run: collapseStatic },
 	{ id: 'removeRedundantKeys', label: 'Remove keys that change nothing', group: 'lossless', on: true, run: removeRedundantKeys },
 	{ id: 'trimKeyframeFields', label: 'Drop unused keyframe fields', group: 'lossless', on: true, run: trimKeyframeFields },

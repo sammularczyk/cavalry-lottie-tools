@@ -304,3 +304,21 @@ test('foldStaticParents removes still, empty parents without moving anything', (
 			A.forEach((v, i) => assert.ok(Math.abs(v - B[i]) < 1e-6, `layer ${ind} @${t}: ${A} vs ${B}`))
 		}
 })
+
+test('flattenShapeGroups lifts sole identity groups and keeps every scope', () => {
+	const tr = (p) => ({ ty: 'tr', p: { a: 0, k: p || [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 } })
+	const sh = { ty: 'sh', ks: { a: 0, k: { v: [[0, 0]], i: [[0, 0]], o: [[0, 0]], c: false } } }
+	const fl = { ty: 'fl', c: { a: 0, k: [1, 0, 0, 1] } }
+	// Cavalry style: layer > gr(identity) > gr(identity) > [sh, fl]
+	const L1 = layer({ shapes: [{ ty: 'gr', it: [{ ty: 'gr', it: [sh, fl, tr()] }, tr()] }] })
+	// moved inner group at layer level: its transform must stay in a group
+	const L2 = layer({ shapes: [{ ty: 'gr', it: [{ ty: 'gr', it: [sh, fl, tr([5, 5])] }, tr()] }] })
+	// two sibling groups: each keeps its own fill scope
+	const L3 = layer({ shapes: [{ ty: 'gr', it: [sh, fl, tr()] }, { ty: 'gr', it: [sh, { ...fl }, tr()] }] })
+	P.flattenShapeGroups({ layers: [L1, L2, L3] })
+	assert.deepEqual(L1.shapes.map((x) => x.ty), ['sh', 'fl'])
+	assert.equal(L2.shapes.length, 1)
+	assert.deepEqual(L2.shapes[0].it.map((x) => x.ty), ['sh', 'fl', 'tr'])
+	assert.deepEqual(L2.shapes[0].it[2].p.k, [5, 5])
+	assert.deepEqual(L3.shapes.map((x) => x.ty), ['gr', 'gr'])
+})

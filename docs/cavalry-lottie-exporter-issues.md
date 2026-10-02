@@ -17,6 +17,7 @@ Found on 2026-10-02 by comparing exports against Cavalry's own renders, in lotti
 | 11 | Static values written as animated with one key (`a:1`, one keyframe). | lottie-web stops drawing the layer entirely, and raw exports render blank. | Write `a:0` with the value. |
 | 12 | Animated keyframes baked to one key per frame (flame scale: 3 × ~490 keys, 130 KB). | Huge files. | Export the scene keyframes and eases when they map directly. Bake only for magic easing or drivers. |
 | 13 | Every group becomes a full Lottie layer (502 of 839 layers drew nothing; 362 KB). | Bloated files, and slower players. | Fold static, non-drawing groups into their children's transforms. |
+| 13b | Every path is wrapped in groups inside groups, each with a full transform, even when those transforms are the identity. | ~13% of the file is transforms that do nothing. | Write a group only where it has a non-identity transform, its own fill/stroke scope or a modifier; otherwise write the items into the parent. |
 | 14 | Data hygiene: `v:"4.6.8"`, float32 noise (`59.90163803100586`), empty `nm`/`mn`, zero skew/`ao` on every layer. | Larger files. | Write a current `v`, round to sensible precision, and omit default fields. |
 | 15 | Skew isn't exported (documented limitation). | Skewed content renders unskewed. | Write `sk`/`sa`. |
 

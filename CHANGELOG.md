@@ -17,3 +17,4 @@
 - Exporter: hold (step) keys are restored from the scene; Cavalry's writer exports them as eases, so values Cavalry holds then snaps (the dreidel lines' stroke width) faded across the gap.
 - Optimiser: still group layers fold into their children ("Fold still group layers").
 - Exporter: keyframed transforms the writer baked per frame use the scene's keys and eases instead, when they reproduce the bake on every frame.
+- Optimiser: "Flatten nested shape groups" lifts sole, identity-transform groups into the level above.
