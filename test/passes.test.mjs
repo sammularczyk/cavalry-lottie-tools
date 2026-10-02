@@ -172,3 +172,56 @@ test('optimise: reports bytes per pass and never grows the file', () => {
 	assert.equal(r.json.layers[0].ks.o.a, 0)
 	assert.deepEqual(r.json.assets, [])
 })
+
+// ---------- lossy ----------
+
+const square = (cx, cy, deg, s = 1) => {
+	const th = (deg * Math.PI) / 180
+	const pts = [[-5, -5], [5, -5], [5, 5], [-5, 5]].map(([x, y]) => [cx + s * (x * Math.cos(th) - y * Math.sin(th)), cy + s * (x * Math.sin(th) + y * Math.cos(th))])
+	return { c: true, v: pts, i: pts.map(() => [0, 0]), o: pts.map(() => [0, 0]) }
+}
+const linKey = { i: { x: 0.833, y: 0.833 }, o: { x: 0.167, y: 0.167 } }
+
+test('recoverRigidMotion: baked spinning, moving square becomes a static path + transform', () => {
+	const keys = Array.from({ length: 10 }, (_, t) => kf(t, [square(20, 10 + t * 3, t * 30)], linKey))
+	const tr = { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 } }
+	const g = { ty: 'gr', it: [{ ty: 'sh', ks: { a: 1, k: keys } }, { ty: 'fl', c: { a: 0, k: [1, 0, 0, 1] } }, tr] }
+	assert.equal(P.recoverRigidMotion({ layers: [layer({ shapes: [g] })] }), 1)
+	assert.equal(g.it[0].ks.a, 0)
+	assert.deepEqual(tr.a.k.map(Math.round), [20, 10])
+	tr.p.k.forEach((k, t) => {
+		assert.ok(Math.abs(k.s[0] - 20) < 1e-6 && Math.abs(k.s[1] - (10 + t * 3)) < 1e-6)
+	})
+	tr.r.k.forEach((k, t) => assert.ok(Math.abs(k.s[0] - t * 30) < 1e-6, 'rotation unwrapped past 180'))
+	tr.s.k.forEach((k) => assert.ok(Math.abs(k.s[0] - 100) < 1e-6))
+})
+
+test('recoverRigidMotion: skips real deformation and eased (non-baked) keys', () => {
+	const warped = Array.from({ length: 4 }, (_, t) => { const sq = square(0, 0, 0); sq.v[0] = [-5 - t * 4, -5]; return kf(t, [sq], linKey) })
+	const spaced = [kf(0, [square(0, 0, 0)], linKey), kf(10, [square(0, 0, 90)])]
+	for (const keys of [warped, spaced]) {
+		const g = { ty: 'gr', it: [{ ty: 'sh', ks: { a: 1, k: keys } }, { ty: 'tr', p: { a: 0, k: [0, 0] } }] }
+		assert.equal(P.recoverRigidMotion({ layers: [layer({ shapes: [g] })] }), 0)
+	}
+})
+
+test('simplifyKeys: a baked straight move collapses; the turning point stays', () => {
+	const vals = [0, 10, 20, 30, 40, 30, 20, 10, 0]
+	const p = { a: 1, k: vals.map((v, t) => kf(t, [v, 0], { i: { x: [1, 1], y: [1, 1] }, o: { x: [0, 0], y: [0, 0] } })) }
+	P.simplifyKeys({ layers: [layer({ ks: { p } })] })
+	assert.deepEqual(p.k.map((k) => k.t), [0, 4, 8])
+})
+
+test('simplifyKeys: eased keys are never dropped', () => {
+	const p = { a: 1, k: [kf(0, [0], ease), kf(5, [50], ease), kf(10, [100])] }
+	P.simplifyKeys({ layers: [layer({ ks: { o: p } })] })
+	assert.equal(p.k.length, 3)
+})
+
+test('roundPrecision: decimals by kind of value', () => {
+	const j = { layers: [layer({ ks: { p: { a: 0, k: [1.23456, -0.0001] }, o: { a: 0, k: 55.555 } }, shapes: [{ ty: 'fl', c: { a: 0, k: [0.123456, 0.5, 0.5, 1] } }] })] }
+	P.roundPrecision(j)
+	assert.deepEqual(j.layers[0].ks.p.k, [1.23, 0])
+	assert.equal(j.layers[0].ks.o.k, 55.6)
+	assert.deepEqual(j.layers[0].shapes[0].c.k, [0.123, 0.5, 0.5, 1])
+})

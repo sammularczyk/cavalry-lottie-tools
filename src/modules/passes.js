@@ -315,6 +315,17 @@ export function trimKeyframeFields(json) {
 				n++
 			}
 			if (last && kf.h === 1) (delete kf.h, n++)
+			// a linear segment written with the shortest tangents (0 and 1), same shape kept
+			if (!last && kf.i && kf.o && isLinearSegment(kf, 4)) {
+				const to = (v, n01) => (Array.isArray(v) ? v.map(() => n01) : n01)
+				const o = { x: to(kf.o.x, 0), y: to(kf.o.y, 0) },
+					i = { x: to(kf.i.x, 1), y: to(kf.i.y, 1) }
+				if (JSON.stringify(o) !== JSON.stringify(kf.o) || JSON.stringify(i) !== JSON.stringify(kf.i)) {
+					kf.o = o
+					kf.i = i
+					n++
+				}
+			}
 		})
 	})
 	return n
@@ -427,6 +438,253 @@ export function stripMeta(json, opts = {}) {
 	return n
 }
 
+// ---------- lossy passes ----------
+
+// What a property measures, from its key and the shape item that holds it; picks the
+// tolerance and the decimals.
+function category(key, owner) {
+	const ty = owner && owner.ty
+	switch (key) {
+		case 'c':
+		case 'g':
+			return 'color'
+		case 'o':
+			return ty === 'tm' ? 'angle' : 'opacity'
+		case 'r':
+			return ty === 'rc' ? 'px' : 'angle'
+		case 'sk':
+		case 'sa':
+			return 'angle'
+		case 's':
+			if (ty === 'rc' || ty === 'el') return 'px'
+			if (ty === 'tm') return 'opacity'
+			return 'scale'
+		case 'e':
+			return ty === 'tm' ? 'opacity' : 'px'
+		default:
+			return 'px'
+	}
+}
+
+export const TOLERANCE = { px: 0.25, scale: 0.25, angle: 0.1, opacity: 0.5, color: 0.004 }
+export const DECIMALS = { px: 2, scale: 2, angle: 2, opacity: 1, color: 3, tangent: 3 }
+
+// A keyframe value as a flat list of numbers (shapes: every vertex and tangent).
+function flatten(s) {
+	if (typeof s === 'number') return [s]
+	if (!Array.isArray(s)) return null
+	if (s.length && isObj(s[0])) {
+		const out = []
+		for (const sh of s) {
+			if (!sh.v) return null
+			for (const f of ['v', 'i', 'o']) for (const pt of sh[f]) out.push(pt[0], pt[1])
+			out.push(sh.c ? 1 : 0)
+		}
+		return out
+	}
+	return s.every((v) => typeof v === 'number') ? s : null
+}
+
+// RDP over time: drop keys whose value lies within tol of the straight line between the
+// keys kept either side. Only runs of linear segments are touched; eased, held and
+// spatial keys always stay.
+export function simplifyKeys(json, opts = {}) {
+	const tol = Object.assign({}, TOLERANCE, opts.tolerance)
+	let n = 0
+	forEachProp(json, (p, key, owner) => {
+		if (!isAnimated(p) || p.k.length < 3 || p.x) return
+		const k = p.k
+		const vals = k.map((kf) => (kf.s === undefined ? null : flatten(kf.s)))
+		if (vals.some((v) => !v || v.length !== vals[0].length)) return
+		const dims = Array.isArray(k[0].s) && !isObj(k[0].s[0]) ? k[0].s.length : 1
+		const t = tol[category(key, owner)]
+		const keep = new Array(k.length).fill(false)
+		keep[0] = keep[k.length - 1] = true
+		for (let j = 0; j < k.length - 1; j++) {
+			if (!isLinearSegment(k[j], dims) || hasSpatial(k[j])) keep[j] = keep[j + 1] = true
+		}
+		const rdp = (a, b) => {
+			let worst = -1,
+				at = -1
+			for (let j = a + 1; j < b; j++) {
+				const u = (k[j].t - k[a].t) / (k[b].t - k[a].t)
+				let err = 0
+				for (let d = 0; d < vals[j].length; d++) err = Math.max(err, Math.abs(vals[a][d] + (vals[b][d] - vals[a][d]) * u - vals[j][d]))
+				if (err > worst) (worst = err), (at = j)
+			}
+			if (worst > t) {
+				keep[at] = true
+				rdp(a, at)
+				rdp(at, b)
+			}
+		}
+		let a = 0
+		for (let j = 1; j < k.length; j++) {
+			if (!keep[j]) continue
+			if (j - a > 1) rdp(a, j)
+			a = j
+		}
+		const kept = k.filter((_, j) => keep[j])
+		n += k.length - kept.length
+		p.k = kept
+	})
+	return n
+}
+
+// Least-squares 2D similarity (rotation, uniform scale, translation) mapping P onto Q.
+function fitSimilarity(P, Q, allowScale) {
+	const m = P.length
+	let px = 0, py = 0, qx = 0, qy = 0
+	for (let i = 0; i < m; i++) (px += P[i][0]), (py += P[i][1]), (qx += Q[i][0]), (qy += Q[i][1])
+	;(px /= m), (py /= m), (qx /= m), (qy /= m)
+	let a = 0, b = 0, pp = 0
+	for (let i = 0; i < m; i++) {
+		const x = P[i][0] - px, y = P[i][1] - py, u = Q[i][0] - qx, v = Q[i][1] - qy
+		a += x * u + y * v
+		b += x * v - y * u
+		pp += x * x + y * y
+	}
+	const th = Math.atan2(b, a)
+	const s = allowScale && pp > EPS ? Math.hypot(a, b) / pp : 1
+	const c = Math.cos(th) * s, sn = Math.sin(th) * s
+	const tx = qx - (c * px - sn * py), ty = qy - (sn * px + c * py)
+	let err = 0
+	for (let i = 0; i < m; i++) {
+		const x = c * P[i][0] - sn * P[i][1] + tx, y = sn * P[i][0] + c * P[i][1] + ty
+		err = Math.max(err, Math.hypot(x - Q[i][0], y - Q[i][1]))
+	}
+	return { th, s, tx, ty, err }
+}
+
+// Vertices plus tangent end points (tangents are relative in Lottie).
+function shapePoints(shapes) {
+	const pts = []
+	for (const sh of shapes)
+		sh.v.forEach((v, i) => {
+			pts.push(v, [v[0] + sh.i[i][0], v[1] + sh.i[i][1]], [v[0] + sh.o[i][0], v[1] + sh.o[i][1]])
+		})
+	return pts
+}
+
+const isStaticIdentityTr = (tr) =>
+	tr &&
+	['p', 'a', 's', 'r', 'sk'].every((f) => !tr[f] || !isAnimated(tr[f])) &&
+	(!tr.o || !isAnimated(tr.o)) &&
+	(!tr.p || asArray(tr.p.k).every((v) => Math.abs(v) < EPS)) &&
+	(!tr.a || asArray(tr.a.k).every((v) => Math.abs(v) < EPS)) &&
+	(!tr.s || asArray(tr.s.k).every((v) => Math.abs(v - 100) < EPS)) &&
+	(!tr.r || Math.abs(asArray(tr.r.k)[0] || 0) < EPS) &&
+	(!tr.sk || Math.abs(asArray(tr.sk.k)[0] || 0) < EPS)
+
+// Baked shapes that only move, turn or scale: keep the first frame's path and move the
+// group's transform instead. Only for frame-by-frame bakes (every key ≤ 1 frame apart),
+// where transform and vertex interpolation agree.
+// ponytail: similarity only (no skew / non-uniform scale); full affine fit if bakes need it.
+export function recoverRigidMotion(json, opts = {}) {
+	const tol = opts.tolerance != null ? opts.tolerance : TOLERANCE.px
+	let n = 0
+	const visit = (items) => {
+		if (!Array.isArray(items)) return
+		for (const g of items) {
+			if (!g || g.ty !== 'gr') continue
+			visit(g.it)
+			const it = g.it || []
+			const tr = it.find((x) => x.ty === 'tr')
+			const paths = it.filter((x) => x.ty === 'sh')
+			if (!paths.length || !isStaticIdentityTr(tr)) continue
+			if (!it.every((x) => ['sh', 'fl', 'st', 'tr'].includes(x.ty))) continue
+			if (!paths.every((x) => isAnimated(x.ks) && !x.ks.x)) continue
+			const times = paths[0].ks.k.map((kf) => kf.t)
+			if (times.length < 2 || !paths.every((x) => x.ks.k.length === times.length && x.ks.k.every((kf, j) => kf.t === times[j] && kf.s)))
+				continue
+			if (times.some((t, j) => j && t - times[j - 1] > 1 + EPS)) continue
+			const frameShapes = times.map((_, j) => paths.flatMap((x) => x.ks.k[j].s))
+			const base = frameShapes[0]
+			if (!frameShapes.every((f) => f.length === base.length && f.every((sh, i) => sh.v.length === base[i].v.length && !!sh.c === !!base[i].c)))
+				continue
+			const P = shapePoints(base)
+			// pivot on the shape's centre so position only carries real movement
+			const c = P.reduce((m, q) => [m[0] + q[0] / P.length, m[1] + q[1] / P.length], [0, 0])
+			const stroked = it.some((x) => x.ty === 'st')
+			const fits = []
+			let ok = true,
+				prev = 0
+			for (const f of frameShapes) {
+				const fit = fitSimilarity(P, shapePoints(f), !stroked) // scaling a group scales its stroke
+				if (fit.err > tol) {
+					ok = false
+					break
+				}
+				let deg = (fit.th * 180) / Math.PI
+				while (deg - prev > 180) deg -= 360
+				while (deg - prev < -180) deg += 360
+				prev = deg
+				const k = Math.cos(fit.th) * fit.s,
+					sn = Math.sin(fit.th) * fit.s
+				fits.push({ p: [k * c[0] - sn * c[1] + fit.tx, sn * c[0] + k * c[1] + fit.ty], r: deg, s: fit.s * 100 })
+			}
+			if (!ok) continue
+			const ease = (j) => {
+				const src = paths[0].ks.k[j]
+				const kf = {}
+				for (const f of ['i', 'o', 'h']) if (src[f] !== undefined) kf[f] = src[f]
+				return kf
+			}
+			const keys = (get) => ({ a: 1, k: fits.map((f, j) => Object.assign({ t: times[j], s: get(f) }, ease(j))) })
+			tr.a = { a: 0, k: c }
+			tr.p = keys((f) => f.p)
+			tr.r = keys((f) => [f.r])
+			if (!stroked) tr.s = keys((f) => [f.s, f.s])
+			paths.forEach((x) => {
+				x.ks = { a: 0, k: x.ks.k[0].s[0] }
+			})
+			n++
+		}
+	}
+	for (const layers of layerLists(json)) for (const L of layers) visit(L.shapes)
+	return n
+}
+
+const roundTo = (v, d) => {
+	const f = Math.pow(10, d)
+	const r = Math.round(v * f) / f
+	return r === 0 ? 0 : r // no -0
+}
+const roundDeep = (v, d) => {
+	if (typeof v === 'number') return roundTo(v, d)
+	if (Array.isArray(v)) return v.map((x) => roundDeep(x, d))
+	if (isObj(v)) {
+		const o = {}
+		for (const k in v) o[k] = k === 'c' && typeof v[k] === 'boolean' ? v[k] : roundDeep(v[k], d)
+		return o
+	}
+	return v
+}
+
+// Decimals per kind of value instead of one global precision.
+export function roundPrecision(json, opts = {}) {
+	const dec = Object.assign({}, DECIMALS, opts.decimals)
+	let n = 0
+	forEachProp(json, (p, key, owner) => {
+		const d = dec[category(key, owner)]
+		n++
+		if (!isAnimated(p)) {
+			p.k = roundDeep(p.k, d)
+			return
+		}
+		for (const kf of p.k) {
+			if (kf.s !== undefined) kf.s = roundDeep(kf.s, d)
+			if (kf.e !== undefined) kf.e = roundDeep(kf.e, d)
+			if (kf.to) kf.to = roundDeep(kf.to, dec.px)
+			if (kf.ti) kf.ti = roundDeep(kf.ti, dec.px)
+			if (kf.i) kf.i = roundDeep(kf.i, dec.tangent)
+			if (kf.o) kf.o = roundDeep(kf.o, dec.tangent)
+			if (typeof kf.t === 'number') kf.t = roundTo(kf.t, 3)
+		}
+	})
+	return n
+}
+
 // ---------- serialising ----------
 
 // Shortest text for a number. With `exponent`, 0.000001 -> 1e-6 and 12300000 -> 123e5.
@@ -472,8 +730,8 @@ export function serialise(json, { pretty = false, exponent = false } = {}) {
 
 // ---------- catalogue + runner ----------
 
-// group: lossless | lossy | assets | output. `unsafe` lists target players the pass is
-// switched off for. Order here is the order passes run in.
+// group: lossless | lossy | assets | output. Order here is the order passes run in: lossy
+// passes come before collapseStatic and friends so those can clean up after them.
 export const PASSES = [
 	{ id: 'removeHidden', label: 'Remove hidden layers and shapes', group: 'lossless', on: true, run: removeHidden },
 	{ id: 'removeDeadLayers', label: 'Remove layers that are never visible', group: 'lossless', on: true, run: removeDeadLayers },
@@ -481,6 +739,9 @@ export const PASSES = [
 	{ id: 'removeUnusedAssets', label: 'Remove unused assets', group: 'lossless', on: true, run: removeUnusedAssets },
 	{ id: 'dedupeAssets', label: 'Merge identical assets', group: 'lossless', on: true, run: dedupeAssets },
 	{ id: 'trimToLayerRange', label: 'Trim keys outside each layer’s time range', group: 'lossless', on: true, run: trimToLayerRange },
+	{ id: 'recoverRigidMotion', label: 'Turn baked moving shapes back into transforms', group: 'lossy', on: true, run: recoverRigidMotion },
+	{ id: 'simplifyKeys', label: 'Simplify keyframes within tolerance', group: 'lossy', on: true, run: simplifyKeys },
+	{ id: 'roundPrecision', label: 'Round values (decimals per kind)', group: 'lossy', on: true, run: roundPrecision },
 	{ id: 'collapseStatic', label: 'Make unchanging animated properties static', group: 'lossless', on: true, run: collapseStatic },
 	{ id: 'removeRedundantKeys', label: 'Remove keys that change nothing', group: 'lossless', on: true, run: removeRedundantKeys },
 	{ id: 'trimKeyframeFields', label: 'Drop unused keyframe fields', group: 'lossless', on: true, run: trimKeyframeFields },

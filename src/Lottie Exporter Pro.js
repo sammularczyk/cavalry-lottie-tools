@@ -78,6 +78,11 @@ var TIPS = {
 	trimKeyframeFields: 'Tangents on hold and last keys, and legacy end values.',
 	unwrapScalars: 'Store [5] as 5 on static values.',
 	stripMeta: 'ln, cl, meta and effect match names.',
+	removeIdentityNulls: 'Null layers that do not move anything (Cavalry adds one per comp).',
+	removeDefaults: 'Zero skew, auto-orient off, empty names.',
+	recoverRigidMotion: 'Baked duplicator/deformer copies that only move, turn or scale keep one path and animate their transform instead. Biggest saving on baked scenes.',
+	simplifyKeys: 'Drops baked keys that lie within a fraction of a pixel (or degree, or %) of a straight line between their neighbours.',
+	roundPrecision: 'Positions and paths to 0.01 px, opacity to 0.1, colours to 0.001.',
 }
 
 var layout = new ui.VLayout()
@@ -121,9 +126,12 @@ var exportButton = new ui.Button('Export comp…')
 layout.add(exportButton)
 layout.addSpacing(6)
 
-layout.add(sectionLabel('Lossless'))
-PASSES.forEach(function (p) {
-	layout.add(checkRow(p.label, TIPS[p.id], p.id))
+;['lossless', 'lossy'].forEach(function (group) {
+	layout.add(sectionLabel(group === 'lossy' ? 'Lossy (within a fraction of a pixel)' : 'Lossless'))
+	PASSES.forEach(function (p) {
+		if (p.group === group) layout.add(checkRow(p.label, TIPS[p.id], p.id))
+	})
+	layout.addSpacing(4)
 })
 layout.add(checkRow('Strip layer and shape names', 'Keeps names that expressions refer to. Leave off if apps look layers up by name (iOS/Android KeyPaths).', 'stripNames'))
 layout.addSpacing(6)
