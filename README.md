@@ -3,7 +3,7 @@
 Lottie import and export for [Cavalry](https://cavalry.studio).
 
 - **Lottie Importer**: opens Lottie `.json` files as native Cavalry layers.
-- **Lottie Optimiser**: Export Cavalry comps to Lottie with even higher fidelity and lower file size than the defauly exporter. Customise the settings to get them even smaller, and validate your files against the different runtimes.
+- **Lottie Optimiser**: Export Cavalry comps to Lottie with even higher fidelity and lower file size than the default exporter. Customise the settings to get them even smaller, and validate your files against different runtimes.
 
 ## Install
 Copy the `.jsc` scripts into Cavalry's Scripts folder.
