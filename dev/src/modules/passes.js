@@ -1629,16 +1629,20 @@ const isPathItem = (x) =>
 // group's, the outer copies go. Cavalry draws each paint once, so this matches it more closely.
 export function removeDoubledPaints(json) {
 	let n = 0
+	const DOUBLED = PAINT_ITEMS.concat(['tm']) // trims are doubled too, and a second trim shortens the path again
 	const strip = (items) => items.map(({ nm, mn, ix, cix, ...rest }) => rest)
+	const bare = (x) => JSON.stringify(x, (k, v) => (['nm', 'mn', 'ix', 'cix', 'np'].includes(k) ? undefined : v))
 	// items: a layer's shape list or a group's; returns it without doubled paints
 	const visit = (items) => {
 		if (!Array.isArray(items)) return items
 		for (const g of items) if (g && g.ty === 'gr') g.it = visit(g.it)
+		// the writer also repeats a trimmed stroke's whole group; once the copies match, keep one
+		items = items.filter((x, i) => !(i > 0 && x.ty === 'gr' && items[i - 1].ty === 'gr' && bare(x) === bare(items[i - 1]) && ++n))
 		const inner = items.filter((x) => x.ty === 'gr')
-		const outerPaints = items.filter((x) => PAINT_ITEMS.includes(x.ty))
+		const outerPaints = items.filter((x) => DOUBLED.includes(x.ty))
 		if (inner.length !== 1 || !outerPaints.length || items.indexOf(inner[0]) !== 0) return items
 		if (inner.length + outerPaints.length + (items.some((x) => x.ty === 'tr') ? 1 : 0) !== items.length) return items
-		const innerPaints = (inner[0].it || []).filter((x) => PAINT_ITEMS.includes(x.ty))
+		const innerPaints = (inner[0].it || []).filter((x) => DOUBLED.includes(x.ty))
 		if (!deepEqual(strip(innerPaints), strip(outerPaints))) return items
 		n += outerPaints.length
 		return items.filter((x) => !outerPaints.includes(x))

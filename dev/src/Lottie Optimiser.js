@@ -20,7 +20,7 @@ var PREF_KEY = 'lottieTools_exporter' // old key kept so saved settings carry ov
 
 // Options that can change how the animation looks or which apps can use it. Everything
 // else is lossless and always on (hidden), so saved settings can't switch it off.
-var ADVANCED = ['precomps', 'recoverRigidMotion', 'simplifyKeys', 'simplifyPaths', 'roundPrecision', 'holdAll', 'refitEased', 'stripNames', 'embedImages', 'jpegImages', 'pretty']
+var ADVANCED = ['precomps', 'gradientStrokeFills', 'recoverRigidMotion', 'simplifyKeys', 'simplifyPaths', 'roundPrecision', 'holdAll', 'refitEased', 'stripNames', 'embedImages', 'jpegImages', 'pretty']
 var ALWAYS = { exponent: true }
 PASSES.forEach(function (p) {
 	if (ADVANCED.indexOf(p.id) < 0) ALWAYS[p.id] = p.on
@@ -57,7 +57,7 @@ function currentPreset() {
 }
 
 function defaults() {
-	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, refitEased: false, precomps: true, bakeMode: 0, tab: 0, accuracy: 1, display: 0, format: 0, embedImages: true, jpegImages: false, advancedOpen: false, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
+	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, refitEased: false, precomps: true, gradientStrokeFills: true, bakeMode: 0, tab: 0, accuracy: 1, display: 0, format: 0, embedImages: true, jpegImages: false, advancedOpen: false, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
 	PASSES.forEach(function (p) {
 		s[p.id] = p.on
 	})
@@ -171,10 +171,13 @@ function page() {
 // ---------- shared: comp picker + status ----------
 
 var compDrop = new ui.DropDown()
+compDrop.setFixedHeight(26) // the refresh button's height
 var compIds = []
 function refreshComps() {
 	compDrop.clear()
-	compIds = api.getComps()
+	compIds = api.getComps().sort(function (a, b) {
+		return api.getNiceName(a).localeCompare(api.getNiceName(b), undefined, { sensitivity: 'base', numeric: true })
+	})
 	var active = api.getActiveComp()
 	compIds.forEach(function (id) {
 		compDrop.addEntry(api.getNiceName(id))
@@ -186,10 +189,16 @@ refreshComps()
 var compRow = new ui.HLayout()
 compRow.setSpaceBetween(6)
 compRow.add(compDrop)
-var refresh = button('↻', false, refreshComps, T)
-refresh.widget.setFixedWidth(30)
-refresh.widget.setToolTip('Refresh the comp list')
-compRow.add(refresh.widget)
+// an ImageButton centres its icon; a Button with an image and no text sets it to the left
+var refresh = new ui.ImageButton(api.getAppAssetsPath() + '/icons/context-menus/reload.png') // Cavalry's own reload icon
+refresh.setImageSize(16, 16)
+refresh.setFixedWidth(30)
+refresh.setFixedHeight(26)
+refresh.setDrawStroke(false)
+refresh.setBackgroundColor(T.raised)
+refresh.setToolTip('Refresh the comp list')
+refresh.onClick = refreshComps
+compRow.add(refresh)
 
 var status = label('', 11, T.muted)
 
@@ -211,7 +220,23 @@ function selectedComp() {
 
 // -> { json, dirs, note }
 function exportSelected() {
-	var opts = { bakeMode: settings.bakeMode > 0 ? settings.bakeMode - 1 : null }
+	// a playback range narrower than the comp is the part meant to ship: export just that
+	var comp = selectedComp()
+	var range = {}
+	;['startFrame', 'endFrame', 'playbackStart', 'playbackEnd'].forEach(function (a) {
+		range[a] = api.get(comp, a)
+	})
+	var narrow = range.playbackStart > range.startFrame || range.playbackEnd < range.endFrame
+	if (narrow) api.set(comp, { startFrame: range.playbackStart, endFrame: range.playbackEnd })
+	try {
+		return exportRange()
+	} finally {
+		if (narrow) api.set(comp, range)
+	}
+}
+
+function exportRange() {
+	var opts = { bakeMode: settings.bakeMode > 0 ? settings.bakeMode - 1 : null, outlineGradientStrokes: settings.gradientStrokeFills }
 	if (!settings.precomps) {
 		var e = exportComp(selectedComp(), opts)
 		return { json: e.json, dirs: [e.dir], note: '' }
@@ -222,6 +247,7 @@ function exportSelected() {
 	if (r.masks) note += (note ? ' · ' : '') + r.masks + ' mask(s) rebuilt'
 	if (r.trackMattes) note += (note ? ' · ' : '') + r.trackMattes + ' track matte(s)'
 	if (r.fills) note += (note ? ' · ' : '') + r.fills + ' fill effect(s)'
+	if (r.outlined) note += (note ? ' · ' : '') + r.outlined + ' stroke(s) drawn as outlines (tapered or gradient)'
 	if (r.warnings && r.warnings.length) note += (note ? '\n' : '') + '⚠ ' + r.warnings.join('\n⚠ ')
 	return { json: r.json, dirs: r.dirs, note: note }
 }
@@ -314,6 +340,7 @@ function checkFile() {
 
 var ROW_TEXT = {
 	precomps: ['Comp references as precomps', 'Writes each comp once and reuses it, so nested comps keep animating with the right timing. Also fixes positions Cavalry’s exporter gets wrong around pivots. Turn off to use Cavalry’s export unchanged.', 'Fixes nested comps, timing and pivots'],
+	gradientStrokeFills: ['Gradient strokes as fills (Canva)', 'Draws each gradient stroke as a filled outline with the gradient, since Canva refuses gradient strokes but takes gradient fills. Other players draw gradient strokes themselves: turn off for a smaller, exact file with real strokes. Needs comp references as precomps.', 'For Canva uploads'],
 	refitEased: ['Experimental: refit eased keys', 'Keyframe fitting also replaces keys that already have eases, staying within your accuracy every half frame. For particles and simulations Cavalry exports as many eased keys; can halve them. Replaces eases you set by hand, and optimising takes longer.', 'Fewer keys, eases not kept'],
 	holdAll: ['Hold every frame-by-frame key', 'Plays exactly Cavalry’s frames, with no in-between frames on fast screens. Smooth baked motion will step at your comp’s frame rate.', 'Exact frames, no in-betweens'],
 	stripNames: ['Strip layer and shape names', 'Smaller file. Leave off if a developer changes colours or text from code, since apps find layers by name.', 'Leave off if apps find layers by name'],

@@ -11,7 +11,8 @@
 // (text, flames, sprigs), so anchors come from the scene and positions are corrected to put
 // each anchor where Cavalry draws the pivot (see repairPositions).
 
-import { exportComp, compLayers } from './cavalryExport.js'
+import { exportComp, compLayers, shaderArrayPicks, fillShader } from './cavalryExport.js'
+import { emptyLike, taperOutlines, widthCurve } from './taper.js'
 
 const isAnimated = (p) => p && Array.isArray(p.k) && p.k.length && typeof p.k[0] === 'object' && 't' in p.k[0]
 
@@ -194,24 +195,223 @@ function sceneFillRule(L, id) {
 	walk(L.shapes)
 }
 
+// Cavalry's gradient geometry, measured against its renders; the writer gets it wrong:
+// - linear: centre = the shape's box centre + Offset, length = box width × Scale, turned by
+//   Rotation. The writer drops Offset, and writes strokes plain white.
+// - radial (Bounding Box mode): an ellipse, semi-axes half the box's width and height ×
+//   Scale × Size Ratio, turned by Rotation. The writer keeps only half the width, so the
+//   gradient ends early; Lottie's radial is a circle, so it's drawn in a group scaled and
+//   turned into the ellipse, with the paths counter-transformed to stay put.
+function sceneGradients(L, id, comp, ref) {
+	const shader = (slot) => {
+		const g = fillShader(id, comp, ref, slot)
+		if (!g || api.getLayerType(g) !== 'gradientShader' || api.get(g, 'screenSpace')) return null
+		return (api.getAnimatedAttributes(g) || []).length ? null : g // ponytail: static gradients only
+	}
+	const bb = api.getBoundingBox(id, false)
+	const fill = shader('material'), stroke = shader('stroke')
+	if (fill && isLinear(fill)) {
+		const { s, e } = linearEnds(fill, bb)
+		forItems(L.shapes, 'gf', (it) => it.t === 1 && ((it.s = { a: 0, k: s }), (it.e = { a: 0, k: e })))
+	}
+	if (fill && api.hasAttribute(fill, 'generator.radiusMode') && api.get(fill, 'generator.radiusMode') === 1) {
+		// ponytail: Fixed Radius not measured against Cavalry
+		const off = api.get(fill, 'generator.offset'), sc = api.get(fill, 'generator.scale'), ratio = api.get(fill, 'generator.radiusRatio')
+		ellipseGradient(L, {
+			c: [bb.centre.x + off.x, -(bb.centre.y + off.y)],
+			rx: (bb.width / 2) * (sc.x / 100) * ratio,
+			ry: (bb.height / 2) * (sc.y / 100) * ratio,
+			rot: -api.get(fill, 'generator.rotation'), // y-up to y-down
+		})
+	}
+	if (stroke && isLinear(stroke)) {
+		// ponytail: radial strokes stay as the writer's solid stroke
+		const { s, e } = linearEnds(stroke, bb)
+		const g = lottieStops(stroke)
+		forItems(L.shapes, 'st', (it, items, i) => {
+			const { c, ...rest } = it
+			items[i] = { ...rest, ty: 'gs', t: 1, g, s: { a: 0, k: s }, e: { a: 0, k: e } }
+		})
+	}
+}
+
+// A stroke Lottie (or Canva) can't take becomes its filled outline, sampled every frame (see
+// taper.js): one with Tapered Width (Lottie can't vary a stroke's width, and none of Cavalry's
+// Lottie bakes outline it), and a gradient stroke (Canva refuses gradient strokes, though it
+// takes gradient fills; optional, on unless opts.outlineGradientStrokes is false). The outline goes in the group that held the stroke, so it shares the
+// path's space; the writer's other copies of the stroke (and their trims, which in Lottie
+// would cut the fill too) go. Plain solid strokes stay strokes.
+// ponytail: outlines join corners as if smooth; sharp corners on a gradient stroke lose their mitre.
+function sceneOutlinedStroke(L, id, comp, gradients) {
+	if (!api.hasStroke(id)) return false
+	const tapered = api.hasAttribute(id, 'stroke.taperedWidth') && api.get(id, 'stroke.taperedWidth')
+	const PAINT = ['st', 'gs']
+	let home = null
+	const findHome = (items) => {
+		for (const it of items || []) {
+			if (home || it.ty !== 'gr') continue
+			// the group holding both a stroke and its path (the writer repeats the stroke on the group outside)
+			if ((it.it || []).some((x) => PAINT.includes(x.ty)) && (it.it || []).some((x) => x.ty === 'sh' || x.ty === 'el')) home = it
+			else findHome(it.it)
+		}
+	}
+	findHome(L.shapes)
+	if (!home) return false
+	const paint = home.it.find((x) => PAINT.includes(x.ty))
+	if (!tapered && !(gradients && paint.ty === 'gs')) return false
+	const paths = home.it.filter((x) => x.ty === 'sh' || x.ty === 'el')
+	if (!paths.length) return false
+	const points = []
+	for (let k = 0; api.hasAttribute(id, 'stroke.widthGraph.' + k + '.position'); k++) {
+		const g = (f) => api.get(id, 'stroke.widthGraph.' + k + '.' + f) || { x: 0, y: 0 }
+		const p = g('position'), l = g('left'), r = g('right')
+		points.push({ x: p.x, y: p.y, lx: l.x, ly: l.y, rx: r.x, ry: r.y })
+	}
+	const curve = !tapered ? () => 1 : points.length > 1 ? widthCurve(points) : (x) => x
+	const round = api.get(id, 'stroke.capStyle') !== 0
+	const from = Math.max(Math.ceil(L.ip), api.get(comp, 'startFrame')), to = Math.min(Math.ceil(L.op) - 1, api.get(comp, 'endFrame'))
+	if (to < from) return false
+	api.setActiveComp(comp)
+	const frames = []
+	for (let f = from; f <= to; f++) {
+		api.setFrame(f)
+		const width = api.get(id, 'stroke.width')
+		const trim = api.get(id, 'stroke.trim') ? { start: api.get(id, 'stroke.trimStart'), end: api.get(id, 'stroke.trimEnd'), travel: api.get(id, 'stroke.trimTravel') } : null
+		frames.push({ t: f, shapes: paths.flatMap((it) => taperOutlines(it.ty === 'el' ? ellipseAt(it, f) : shapeAt(it.ks, f), width, curve, trim, round)) })
+	}
+	// one sh per outline slot; frames with fewer pieces draw that slot as nothing
+	const slots = Math.max(0, ...frames.map((fr) => fr.shapes.length))
+	if (!slots) return false
+	const like = []
+	for (const fr of frames) fr.shapes.forEach((sh, k) => (like[k] = like[k] || sh))
+	const outline = []
+	for (let k = 0; k < slots; k++) {
+		const keys = frames.map((fr) => ({ t: fr.t, s: [fr.shapes[k] || emptyLike(like[k])], h: 1 }))
+		outline.push({ ty: 'sh', ks: keys.length === 1 ? { a: 0, k: keys[0].s[0] } : { a: 1, k: keys } })
+	}
+	const { c, w, lc, lj, ml, d, ty, ...gradient } = paint
+	const fill = ty === 'gs' ? { ...gradient, ty: 'gf', r: 1 } : { ty: 'fl', c, o: paint.o, r: 1 }
+	// strip every copy of the stroke and its trims; groups left with nothing to paint go
+	const hasPaint = (items) => (items || []).some((x) => ['fl', 'gf', 'st', 'gs'].includes(x.ty) || (x.ty === 'gr' && hasPaint(x.it)))
+	const strip = (items) =>
+		(items || [])
+			.filter((it) => !PAINT.includes(it.ty) && it.ty !== 'tm')
+			.map((it) => (it.ty === 'gr' ? { ...it, it: strip(it.it) } : it))
+			.filter((it) => it.ty !== 'gr' || hasPaint(it.it))
+	const rest = home.it.filter((x) => !PAINT.includes(x.ty) && x.ty !== 'tm')
+	const identity = { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 } }
+	// the paths stay only if something else in the group still paints them
+	home.it = [{ ty: 'gr', it: outline.concat([fill, identity]) }].concat(hasPaint(rest) ? rest : rest.filter((x) => x.ty === 'tr'))
+	L.shapes = strip(L.shapes)
+	return true
+}
+
+// A Lottie ellipse at frame t as a path (four arcs from the top, clockwise; reversed for d: 3).
+function ellipseAt(el, t) {
+	const [w, h] = valueAt(el.s, t), [cx, cy] = valueAt(el.p, t)
+	const rx = w / 2, ry = h / 2, K = 0.5523 // ponytail: the usual quarter-circle handle, 0.03% out
+	const shape = {
+		c: true,
+		v: [[cx, cy - ry], [cx + rx, cy], [cx, cy + ry], [cx - rx, cy]],
+		i: [[-rx * K, 0], [0, -ry * K], [rx * K, 0], [0, ry * K]],
+		o: [[rx * K, 0], [0, ry * K], [-rx * K, 0], [0, -ry * K]],
+	}
+	if (el.d !== 3) return shape
+	const r = (a) => [a[0]].concat(a.slice(1).reverse())
+	return { c: true, v: r(shape.v), i: r(shape.o), o: r(shape.i) }
+}
+
+// A Lottie path property's shape at frame t (eased between keys like any other property).
+function shapeAt(ks, t) {
+	if (!isAnimated(ks)) return Array.isArray(ks.k) ? ks.k[0] : ks.k
+	const k = ks.k
+	if (t <= k[0].t) return k[0].s[0]
+	for (let j = 0; j < k.length - 1; j++) {
+		const a = k[j], b = k[j + 1]
+		if (t >= b.t) continue
+		if (a.h === 1 || !b.s) return a.s[0]
+		const u = valueAt({ a: 1, k: [{ t: a.t, s: [0], i: a.i, o: a.o }, { t: b.t, s: [1] }] }, t)[0]
+		const A = a.s[0], B = b.s[0]
+		const mix = (p, q) => p.map((v, i) => [v[0] + (q[i][0] - v[0]) * u, v[1] + (q[i][1] - v[1]) * u])
+		return A.v.length === B.v.length ? { c: A.c, v: mix(A.v, B.v), i: mix(A.i, B.i), o: mix(A.o, B.o) } : A
+	}
+	return k[k.length - 1].s[0]
+}
+
+const isLinear = (g) => api.hasAttribute(g, 'generator.autoSetGradWidth')
+
+function forItems(items, ty, fn) {
+	;(items || []).forEach((it, i) => (it.ty === ty ? fn(it, items, i) : it.ty === 'gr' && forItems(it.it, ty, fn)))
+}
+
+// Lottie start and end points (y down) of a linear Gradient Shader on a shape with box bb.
+function linearEnds(g, bb) {
+	const off = api.get(g, 'generator.offset'), sc = api.get(g, 'generator.scale'), rot = (api.get(g, 'generator.rotation') * Math.PI) / 180
+	const dx = Math.cos(rot), dy = Math.sin(rot)
+	// ponytail: 'scales with rotation' length (box projected on the gradient's axis) not measured against Cavalry
+	const len = api.get(g, 'generator.autoSetGradWidth') ? Math.abs(bb.width * dx) + Math.abs(bb.height * dy) : bb.width
+	const half = (len / 2) * sc, cx = bb.centre.x + off.x, cy = bb.centre.y + off.y
+	return { s: [cx - dx * half, -(cy - dy * half)], e: [cx + dx * half, -(cy + dy * half)] }
+}
+
+// A Gradient Shader's stops as Lottie gradient data: colours, then opacities.
+function lottieStops(g) {
+	const col = [], alpha = []
+	let p = 0
+	for (; api.hasAttribute(g, 'generator.gradient.' + p + '.position'); p++) {
+		const t = api.get(g, 'generator.gradient.' + p + '.position'), c = api.get(g, 'generator.gradient.' + p + '.color')
+		col.push(t, c.r / 255, c.g / 255, c.b / 255)
+		alpha.push(t, c.a / 255)
+	}
+	return { p, k: { a: 0, k: col.concat(alpha) } } // ponytail: stop interpolation other than linear is drawn linear
+}
+
+// g: { c: centre, rx, ry: semi-axes, rot: degrees }, in the gradient's group space.
+// Only groups of static rectangles/paths and one static radial gradient fill are changed.
+export function ellipseGradient(L, g) {
+	const cos = Math.cos((g.rot * Math.PI) / 180), sin = Math.sin((g.rot * Math.PI) / 180)
+	const vec = ([x, y]) => [((x * cos + y * sin) * 100) / g.rx, ((-x * sin + y * cos) * 100) / g.ry]
+	const pt = ([x, y]) => vec([x - g.c[0], y - g.c[1]])
+	const shape = (s) => ({ ...s, v: s.v.map(pt), i: s.i.map(vec), o: s.o.map(vec) })
+	const toPath = (it) => {
+		if (it.ty === 'sh')
+			return { ...it, ks: isAnimated(it.ks) ? { ...it.ks, k: it.ks.k.map((k) => ({ ...k, s: k.s && k.s.map(shape), e: k.e && k.e.map(shape) })) } : { ...it.ks, k: shape(it.ks.k) } }
+		const [cx, cy] = it.p.k, [w, h] = it.s.k
+		const v = [[cx + w / 2, cy - h / 2], [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2], [cx - w / 2, cy - h / 2]]
+		if (it.d === 3) v.reverse()
+		return { ty: 'sh', d: it.d, ks: { a: 0, k: shape({ c: true, v, i: v.map(() => [0, 0]), o: v.map(() => [0, 0]) }) } }
+	}
+	const fits = (it) =>
+		it.ty === 'sh' || (it.ty === 'rc' && !isAnimated(it.p) && !isAnimated(it.s) && !isAnimated(it.r) && !(it.r && [].concat(it.r.k)[0]))
+	let n = 0
+	const visit = (items) => {
+		for (const gr of items || []) {
+			if (gr.ty !== 'gr') continue
+			const own = (gr.it || []).filter((it) => it.ty !== 'tr')
+			const gfs = own.filter((it) => it.ty === 'gf')
+			if (gfs.length !== 1 || gfs[0].t !== 2 || isAnimated(gfs[0].s) || isAnimated(gfs[0].e) || !own.every((it) => it === gfs[0] || fits(it))) {
+				visit(gr.it)
+				continue
+			}
+			const tr = { ty: 'tr', p: { a: 0, k: g.c }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [g.rx, g.ry] }, r: { a: 0, k: g.rot }, o: { a: 0, k: 100 } }
+			const inner = { ty: 'gr', it: own.filter((it) => it !== gfs[0]).map(toPath).concat([{ ...gfs[0], s: { a: 0, k: [0, 0] }, e: { a: 0, k: [100, 0] } }, tr]) }
+			gr.it = [inner].concat(gr.it.filter((it) => it.ty === 'tr'))
+			n++
+		}
+	}
+	visit(L.shapes)
+	return n > 0
+}
+
 // Lottie properties a scene attribute was written to, on one exported layer.
 function lottieProps(L, attr) {
 	const ks = L.ks || {}
-	const first = (ty) => {
-		const walk = (items) => {
-			for (const it of items || []) {
-				if (it.ty === ty) return it
-				if (it.ty === 'gr') {
-					const r = walk(it.it)
-					if (r) return r
-				}
-			}
-		}
-		return walk(L.shapes)
-	}
+	// every item of a type: the writer repeats a shape's paints and trims, all from one attribute
 	const sub = (ty, f) => {
-		const it = first(ty)
-		return it && it[f] ? [it[f]] : []
+		const out = []
+		const walk = (items) => (items || []).forEach((it) => (it.ty === ty && it[f] ? out.push(it[f]) : it.ty === 'gr' && walk(it.it)))
+		walk(L.shapes)
+		return out
 	}
 	switch (attr) {
 		case 'opacity':
@@ -361,6 +561,36 @@ function sceneTransformKeys(L, id) {
 			ks.p[axis] = isAnimated(fresh) ? Object.assign({}, fresh, { k: fresh.k.map((kf) => Object.assign({}, kf, { s: [kf.s[0] + off] })) }) : { a: 0, k: fresh.k + off }
 			n++
 		}
+	}
+	return n
+}
+
+// Keys eased by speed and influence don't play as the bezier handles the writer copies from
+// them (a group's position ran 9 px behind Cavalry's mid-move). Where a transform's keys use
+// them and the Lottie curve strays from Cavalry's, it takes Cavalry's value on every frame;
+// keyframe fitting thins them again. Position keeps its constant offset (pivot repair).
+// ponytail: position and rotation only; scale's keys go through as written.
+function sceneSpeedKeys(L, id, comp) {
+	const ks = L.ks
+	if (!ks) return 0
+	let n = 0
+	const props = ks.p && ks.p.s ? [['position.x', 'x', 1, true], ['position.y', 'y', -1, true]] : []
+	for (const [attr, key, sign, offset] of props.concat([['rotation.z', 'r', -1, false]])) {
+		const owner = key === 'r' ? ks : ks.p
+		const prop = owner[key]
+		if (!isAnimated(prop)) continue
+		const ids = api.getKeyframeIdsForAttribute(id, attr) || []
+		const speedy = (k) => {
+			const d = api.get(k, 'data') || {}
+			return d.leftSpeed != null || d.rightSpeed != null
+		}
+		if (!ids.some(speedy)) continue
+		const from = Math.round(prop.k[0].t), to = Math.round(prop.k[prop.k.length - 1].t)
+		const vals = sampleAttr(comp, id, attr, from, to)
+		const off = offset ? valueAt(prop, from)[0] - sign * vals[0] : 0
+		if (vals.every((v, j) => Math.abs(valueAt(prop, from + j)[0] - (sign * v + off)) <= 0.05)) continue
+		owner[key] = frameKeys(vals, from, (v) => [sign * v + off])
+		n++
 	}
 	return n
 }
@@ -951,12 +1181,13 @@ export function exportWithPrecomps(compId, opts = {}) {
 		maskCount = 0,
 		trackMattes = 0,
 		fills = 0,
+		outlined = 0,
 		refs = 0,
 		next = 0
 	const userComp = api.getActiveComp(),
 		userFrame = api.getFrame()
 
-	function build(comp) {
+	function build(comp, ref) {
 		const plan = planMattes(comp, (w) => warnings.push(w))
 		const shown = []
 		let out
@@ -966,7 +1197,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 				api.set(q, { hidden: false })
 				shown.push(q)
 			}
-			out = exportComp(comp, opts)
+			out = exportComp(comp, Object.assign({}, opts, { ref }))
 		} finally {
 			for (const q of shown) api.set(q, { hidden: true })
 		}
@@ -993,10 +1224,12 @@ export function exportWithPrecomps(compId, opts = {}) {
 			const inner = compOf(id)
 			if (!inner) return L
 			refs++
-			if (!cache[inner]) {
+			// references whose overrides pick different shaders need exports of their own
+			const key = inner + shaderArrayPicks(inner, id).map((p) => '|' + p.shader).join('')
+			if (!cache[key]) {
 				const assetId = 'comp_' + next++
-				cache[inner] = assetId // set before recursing, so a cycle ends here
-				const built = build(inner)
+				cache[key] = assetId // set before recursing, so a cycle ends here
+				const built = build(inner, id)
 				assets.push({ id: assetId, nm: api.getNiceName(inner), fr: built.fr, layers: built.layers })
 				for (const a of built.assets || []) if (!assets.some((b) => b.id === a.id)) assets.push(a)
 			}
@@ -1004,7 +1237,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 			const out = {}
 			for (const k in L) if (k !== 'shapes' && k !== 'ty') out[k] = L[k]
 			out.ty = 0
-			out.refId = cache[inner]
+			out.refId = cache[key]
 			out.w = w
 			out.h = h
 			// the inlined shapes sat around the comp's centre; precomp space starts top-left
@@ -1041,6 +1274,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 			const id = sceneOf.get(L)
 			if (!id) continue
 			sceneTransformKeys(L, id)
+			sceneSpeedKeys(L, id, comp)
 			sceneRotationScale(L, id)
 			sceneSkew(L, id, [comp, api.get(comp, 'startFrame'), last])
 			if (L.ty !== 0) sceneOpacity(L, id, [comp, api.get(comp, 'startFrame'), last])
@@ -1050,6 +1284,8 @@ export function exportWithPrecomps(compId, opts = {}) {
 		inheritOpacity(exported.layers, api.get(comp, 'startFrame'), last)
 		repair(comp, exported, sceneOf)
 		addFills(comp, exported, sceneOf) // before mattes, so matte copies carry them
+		for (const L of exported.layers) if (sceneOf.get(L)) sceneGradients(L, sceneOf.get(L), comp, ref)
+		for (const L of exported.layers) if (sceneOf.get(L) && sceneOutlinedStroke(L, sceneOf.get(L), comp, opts.outlineGradientStrokes !== false)) outlined++
 		for (const L of exported.layers) if (sceneOf.get(L)) sceneFillRule(L, sceneOf.get(L))
 		buildTrackMattes(comp, exported, sceneOf, plan)
 		return exported
@@ -1070,10 +1306,17 @@ export function exportWithPrecomps(compId, opts = {}) {
 		}
 		let ind = Math.max(0, ...layers.map((L) => L.ind || 0)) + 1
 		const used = new Set(), assetFor = new Map()
-		for (const job of plan.jobs) {
+		// a matte source that has its own matte is matted first, so its matte layer goes into the copy
+		const jobs = [], rest = plan.jobs.slice()
+		while (rest.length) {
+			const i = rest.findIndex((J) => !rest.some((K) => K !== J && J.sources.some((src) => within(K.target, src))))
+			jobs.push(rest.splice(Math.max(i, 0), 1)[0]) // a cycle takes the first
+		}
+		for (const job of jobs) {
 			const key = job.sources.slice().sort().join('+')
 			if (!assetFor.has(key)) {
-				const own = layers.filter((L) => sceneOf.get(L) && job.sources.some((src) => within(sceneOf.get(L), src)))
+				const inSrc = (L) => !!L && !!sceneOf.get(L) && job.sources.some((src) => within(sceneOf.get(L), src))
+				const own = layers.filter((L, i) => inSrc(L) || (L.td && layers[i + 1] && layers[i + 1].tt && inSrc(layers[i + 1])))
 				if (!own.length) {
 					warnings.push('A track matte on ' + api.getNiceName(job.target) + ' in ' + api.getNiceName(comp) + ' had nothing to export; it shows unmatted')
 					assetFor.set(key, null)
@@ -1105,7 +1348,9 @@ export function exportWithPrecomps(compId, opts = {}) {
 		}
 		// sources that were hidden were only exported for their mattes
 		const hiddenSrc = (L) => plan.unhide.some((q) => within(sceneOf.get(L), q))
-		exported.layers = layers.filter((L) => !used.has(L) || !hiddenSrc(L) || layers.some((q) => q.parent === L.ind && !used.has(q)))
+		const kept = layers.filter((L) => !used.has(L) || !hiddenSrc(L) || layers.some((q) => q.parent === L.ind && !used.has(q)))
+		// a matte layer whose drawing layer went goes too
+		exported.layers = kept.filter((L, i) => !L.td || (kept[i + 1] && kept[i + 1].tt))
 	}
 
 	function addFills(comp, exported, sceneOf) {
@@ -1195,5 +1440,5 @@ export function exportWithPrecomps(compId, opts = {}) {
 		api.setFrame(userFrame)
 	}
 	json.assets = (json.assets || []).concat(assets)
-	return { json, dirs, warnings, precomps: assets.length, refs, pivots, baked, masks: maskCount, trackMattes, fills }
+	return { json, dirs, warnings, precomps: assets.length, refs, pivots, baked, masks: maskCount, trackMattes, fills, outlined }
 }

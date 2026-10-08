@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { applyMasks, fillProps, layerMatrix, lottieRSK, padMatteBounds, planMattes, repairPositions, staticSingleKeys, valueAt } from '../src/modules/precomps.js'
+import { applyMasks, ellipseGradient, fillProps, layerMatrix, lottieRSK, padMatteBounds, planMattes, repairPositions, staticSingleKeys, valueAt } from '../src/modules/precomps.js'
 
 // Rect centres measured in Cavalry (y up, origin at the comp centre) at frames 0, 5, 10.
 const CAVALRY = {
@@ -186,4 +186,25 @@ test('planMattes skips group track mattes (Cavalry draws the children unmatted)'
 	assert.deepEqual(plan.jobs.map((j) => j.target), ['U'])
 	assert.deepEqual(plan.unhide, ['S2'])
 	assert.equal(warnings.length, 1)
+})
+
+test('ellipseGradient: paths stay put and the ellipse edge is the gradient end', () => {
+	const rc = { ty: 'rc', d: 1, s: { a: 0, k: [200, 80] }, p: { a: 0, k: [0, 0] }, r: { a: 0, k: 0 } }
+	const gf = { ty: 'gf', t: 2, s: { a: 0, k: [-50, 10] }, e: { a: 0, k: [50, 10] }, g: { p: 2, k: { a: 0, k: [0, 0, 0, 0, 1, 1, 1, 1] } } }
+	const tr0 = { ty: 'tr', p: { a: 0, k: [0, 0] } }
+	const L = { ty: 4, shapes: [{ ty: 'gr', it: [rc, gf, tr0] }] }
+	const g = { c: [-50, 10], rx: 300, ry: 120, rot: 30 }
+	assert.equal(ellipseGradient(L, g), true)
+	const [inner, tr] = L.shapes[0].it
+	assert.equal(tr, tr0)
+	const [sh, gf2, t] = inner.it
+	const cos = Math.cos(Math.PI / 6), sin = Math.sin(Math.PI / 6)
+	// Lottie group transform: p + R(r) * S(s/100) * q
+	const fwd = ([x, y]) => [t.p.k[0] + cos * x * (t.s.k[0] / 100) - sin * y * (t.s.k[1] / 100), t.p.k[1] + sin * x * (t.s.k[0] / 100) + cos * y * (t.s.k[1] / 100)]
+	const corners = sh.ks.k.v.map(fwd)
+	const want = [[100, -40], [100, 40], [-100, 40], [-100, -40]]
+	corners.forEach((c, i) => c.forEach((v, j) => assert.ok(Math.abs(v - want[i][j]) < 1e-9)))
+	// gradient end (local [100, 0]) lands one semi-axis rx from the centre along the rotation
+	const end = fwd(gf2.e.k)
+	assert.ok(Math.abs(Math.hypot(end[0] - g.c[0], end[1] - g.c[1]) - g.rx) < 1e-9)
 })
