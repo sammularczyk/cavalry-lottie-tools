@@ -112,5 +112,114 @@ export function exportComp(compId, opts) {
 	var file = dir + '/export.json'
 	if (!api.filePathExists(file)) throw new Error('Cavalry did not write a Lottie file (is Lottie export licensed?)')
 	var text = api.readFromFile(file)
-	return { json: JSON.parse(text), text: text, dir: dir, file: file, baked: restore.map(function (r) { return r[0] }) }
+	var json = JSON.parse(text)
+	if (fadeAutoAnimate(compId, json)) text = JSON.stringify(json)
+	return { json: json, text: text, dir: dir, file: file, baked: restore.map(function (r) { return r[0] }) }
+}
+
+// The opacity of one glyph under an Auto-Animate: a hold at 0 (or 100) until `start`, then
+// the progress curve `prog` (progress at start, start+1, ...) as per-frame keys. mode:
+// 'up' fades 0 -> 100, 'down' 100 -> 0, 'appear' steps from 0 to 100 at `start`.
+export function glyphOpacity(start, prog, mode) {
+	var lin = { i: { x: [1], y: [1] }, o: { x: [0], y: [0] } }
+	var key = function (t, v, hold) {
+		return Object.assign({ t: t, s: [v] }, hold ? { h: 1 } : lin)
+	}
+	if (mode === 'appear') return { a: 1, k: [key(0, 0, true), key(start, 100, true)] }
+	var from = mode === 'down' ? 100 : 0
+	var k = [key(0, from, true)]
+	prog.forEach(function (p, i) {
+		k.push(key(start + i, mode === 'down' ? 100 - p : p))
+	})
+	return { a: 1, k: k }
+}
+
+// Frames each glyph of `text` is delayed by an Auto-Animate's Time Offset, in the order
+// Cavalry exports the glyphs (last character first), or null when the offset isn't the
+// plain case: automatic, negative, normal order, per word or per character. Checked
+// against Cavalry's own renders: the elements at the level spread |offset| frames evenly,
+// the first starting at once (reverse flips them).
+export function glyphDelays(text, aa) {
+	if (!aa.automatic || aa.offset >= 0 || aa.timing !== 0 || aa.groupByParent || (aa.level !== 2 && aa.level !== 3)) return null
+	var chars = text.replace(/\s/g, '').length
+	var words = text.split(/\s+/).filter(Boolean)
+	var el = []
+	words.forEach(function (w, wi) {
+		for (var i = 0; i < w.length; i++) el.push(aa.level === 2 ? wi : el.length)
+	})
+	var n = aa.level === 2 ? words.length : chars
+	return el.map(function (k) {
+		return (-aa.offset * (aa.reverse ? n - 1 - k : k)) / Math.max(n - 1, 1)
+	}).reverse()
+}
+
+// Cavalry bakes text into glyph paths but its Lottie writer drops the Auto-Animate's
+// Opacity / Visibility modes, so every glyph shows from the first frame. A glyph starts
+// when its progress leaves 0: the delay comes from the Time Offset when that's the plain
+// case (glyphDelays), else from where its baked path first moves. The progress curve goes
+// on as group opacity.
+// ponytail: other offsets need a position/scale/rotation mode to read the start from.
+function fadeAutoAnimate(compId, json) {
+	var changed = 0
+	var frame = api.getFrame()
+	compLayers(compId).forEach(function (id) {
+		if (!api.hasAttribute(id, 'deformers.0')) return
+		var aa = (api.getInConnection(id, 'deformers.0') || '').split('.')[0]
+		if (!aa || api.getLayerType(aa) !== 'autoAnimate') return
+		var mode = api.get(aa, 'opacityMode') === 1 ? 'up' : api.get(aa, 'opacityMode') === 2 ? 'down' : api.get(aa, 'visibilityMode') === 1 ? 'appear' : null
+		if (!mode) return
+		var attr = api.get(aa, 'progressMode') === 1 ? 'opacityProgress' : 'progress'
+		var keys = api.getKeyframeTimes(aa, attr)
+		var last = keys.length ? keys[keys.length - 1] : 0
+		var prog = []
+		for (var f = 0; f <= last; f++) {
+			api.setFrame(f)
+			prog.push(api.get(aa, attr))
+		}
+		var first = prog.findIndex(function (p) { return p > 0 })
+		if (first < 0) return
+		prog = prog.slice(first)
+		var layer = json.layers.filter(function (l) { return l.ty === 4 && l.nm === api.getNiceName(id) })[0]
+		if (!layer) return
+		var text = api.hasAttribute(id, 'text') ? (api.get(id, 'text') || {}).text : null // a text shape's value is {text, overrides}
+		var delays = typeof text !== 'string' ? null : glyphDelays(text, {
+			automatic: api.get(aa, 'automaticTimeOffset'),
+			offset: api.get(aa, 'timeOffset'),
+			timing: api.get(aa, 'timingMode'),
+			groupByParent: api.get(aa, 'groupByParent'),
+			level: api.get(aa, 'levelMode'),
+			reverse: api.get(aa, 'reverseTimeOffset'),
+		})
+		var groups = glyphGroups(layer.shapes)
+		if (delays && delays.length !== groups.length) delays = null
+		groups.forEach(function (g, gi) {
+			var tr = g.it.filter(function (s) { return s.ty === 'tr' })[0]
+			var kf = g.it.filter(function (s) { return s.ty === 'sh' })[0].ks.k
+			if (!tr || (tr.o && tr.o.a === 1) || !Array.isArray(kf)) return
+			var start = first + Math.floor(delays ? delays[gi] + 1e-6 : 0)
+			if (!delays) {
+				var v = function (k) { return k.s[0].v[0] }
+				var base = v(kf[0])
+				var move = kf.filter(function (k) { return Math.abs(v(k)[0] - base[0]) + Math.abs(v(k)[1] - base[1]) > 0.01 })[0]
+				if (!move || move.t < 1) return
+				start = move.t
+			}
+			tr.o = glyphOpacity(start, prog, mode)
+			changed++
+		})
+	})
+	api.setFrame(frame)
+	return changed
+}
+
+// Shape groups that hold an animated path of their own (the glyphs of a baked text layer).
+function glyphGroups(items, out) {
+	out = out || []
+	;(items || []).forEach(function (s) {
+		if (s.ty !== 'gr') return
+		var sh = s.it.filter(function (c) { return c.ty === 'sh' })[0]
+		if (sh && sh.ks && sh.ks.a === 1) out.push(s)
+		else glyphGroups(s.it, out)
+	})
+	return out
 }

@@ -1,5 +1,20 @@
 # Changelog
 
+## Lottie Optimiser 1.2.0 (2026-10-08)
+- Exporter: text animated by an Auto-Animate with Opacity (Fade Up/Down) or Visibility (Appear) mode now fades in or appears glyph by glyph (Cavalry's writer dropped both, so every glyph showed from the first frame). Delays come from the Auto-Animate's Time Offset (automatic, negative, normal order, per word or character); other setups read each glyph's start from its baked motion, so need a position, scale or rotation mode too.
+- Exporter: exports the comp's playback range when it's narrower than the comp (a 0–2400 comp played 0–184 exported 2400 frames).
+- Exporter: fills and strokes coloured through a Shader Array export the shader it shows, including one picked by a precomp override on the comp reference (Cavalry's writer wrote the bare colour, often transparent or white). References that pick different shaders get a precomp each.
+- Exporter: radial gradients export as the ellipse Cavalry draws, from the shader's Scale, Rotation, Size Ratio and the shape's height (Cavalry's writer wrote a circle half the width across, so the gradient ended early). Drawn as a circle in a scaled, rotated group, with the path counter-transformed.
+- Exporter: linear gradients include the shader's Offset (dropped by Cavalry's writer).
+- Exporter: gradient strokes export (Cavalry's writer wrote them white), built from the shader's stops.
+- Optimiser panel: "Gradient strokes as fills (Canva)" under Advanced, on by default: draws gradient strokes as filled outlines with the gradient, since Canva refuses gradient strokes but takes gradient fills. Off keeps real gradient strokes, smaller and exact, for other players.
+- Exporter: tapered strokes (Tapered Width, custom width curve) export as filled outlines, one key per frame, matching Cavalry's taper as measured against its renders: the curve along the whole contour, trims and wrapping Travel, round caps. Lottie strokes have one width, and none of Cavalry's bakes outline them. Plain strokes stay strokes.
+- Exporter: a matte source that has its own matte keeps it (a logo wiped on by a stroke and used as a gradient's matte showed unwiped).
+- Exporter: keys with speed/influence easing that Cavalry's writer exports on a different curve take Cavalry's value on every frame, then keyframe fitting thins them (a group drifted 9 px mid-move, pushing a logo out of its matte).
+- Exporter: the scene's eases go on every copy of a repeated stroke or trim, not just the first.
+- Optimiser: "Remove doubled fills and strokes" also removes the second trim Cavalry writes on trimmed strokes (it trimmed the path twice) and the repeated copy of the stroke.
+- Optimiser panel: the comp list is alphabetical, the same height as the refresh button, which uses Cavalry's own reload icon.
+
 ## Lottie Optimiser 1.0.0, Lottie Importer 1.1.0 (2026-10-02)
 - Exporter: track mattes on groups are no longer exported: Cavalry draws a group's children unmatted (tested hidden and visible sources, inverted, nested groups), so the export clipped what Cavalry doesn't. A warning names the group.
 - Exporter: vertical skew exports, as do both skews at once and skew under non-uniform scale. Cavalry skews before scaling and lottie-web after, so rotation, scale and skew are rebuilt together (checked against Cavalry); keyed or driven ones are sampled every frame.
