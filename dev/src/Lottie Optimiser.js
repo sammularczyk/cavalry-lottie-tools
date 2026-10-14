@@ -1,11 +1,11 @@
 // Lottie Optimiser
-// Preflight: checks a comp (or any Lottie file) against the players you target.
 // Export: exports a comp with Cavalry's own Lottie writer, then optimises the JSON with
 // selectable passes. Also optimises any existing Lottie file.
+// Report: what each pass saved, and what each Lottie player can't show.
 
 import { PASSES, optimise, serialise } from './modules/passes.js'
-import { PLAYERS, checkLottie, describePlayers } from './modules/players.js'
-import { theme, label, section, button, row, toggleRow, list, tabStrip } from './modules/ui/kit.js'
+import { checkLottie, describePlayers } from './modules/players.js'
+import { theme, label, section, button, row, toggleRow, list, tabStrip, icon } from './modules/ui/kit.js'
 import { checkForUpdate } from './modules/updateChecker.js'
 import { exportComp, BAKE_MODES } from './modules/cavalryExport.js'
 import { packImages } from './modules/images.js'
@@ -14,6 +14,7 @@ import { exportWithPrecomps } from './modules/precomps.js'
 
 var GITHUB_REPO = 'sammularczyk/cavalry-lottie-tools'
 var SCRIPT_NAME = 'Lottie Optimiser'
+var TAG = '[' + SCRIPT_NAME + '] '
 var PREF_KEY = 'lottieTools_exporter' // old key kept so saved settings carry over
 
 // ---------- settings ----------
@@ -57,7 +58,7 @@ function currentPreset() {
 }
 
 function defaults() {
-	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, refitEased: false, precomps: true, gradientStrokeFills: true, bakeMode: 0, tab: 0, accuracy: 1, display: 0, format: 0, embedImages: true, jpegImages: false, advancedOpen: false, targets: ['webSvg', 'android', 'iosCA', 'thorvg'] }
+	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, refitEased: false, precomps: true, gradientStrokeFills: true, bakeMode: 0, page: 0, accuracy: 1, display: 0, format: 0, embedImages: true, jpegImages: false, advancedOpen: false }
 	PASSES.forEach(function (p) {
 		s[p.id] = p.on
 	})
@@ -84,7 +85,6 @@ function save() {
 }
 
 var T = theme()
-var FATAL = '#e5534b'
 
 // The most anything may move, in pixels at the size the animation plays at.
 var ACCURACY = [
@@ -134,7 +134,7 @@ var TIPS = {
 // A labelled dropdown that stores its index in settings[key].
 function choiceRow(key, title, entries, tip, onChange) {
 	var r = new ui.HLayout()
-	r.setMargins(8, 2, 8, 2)
+	r.setMargins(0, 0, 0, 0)
 	r.setSpaceBetween(6)
 	r.add(label(title, 12, T.text))
 	r.addStretch()
@@ -158,7 +158,7 @@ function optionRow(key, title, tip, detail, onChange) {
 		settings[key] = on
 		save()
 		if (onChange) onChange()
-	}, tip).widget
+	}, tip, adv).widget
 }
 
 function page() {
@@ -168,7 +168,7 @@ function page() {
 	return l
 }
 
-// ---------- shared: comp picker + status ----------
+// ---------- shared: comp picker ----------
 
 var compDrop = new ui.DropDown()
 compDrop.setFixedHeight(26) // the refresh button's height
@@ -194,24 +194,44 @@ var refresh = new ui.ImageButton(api.getAppAssetsPath() + '/icons/context-menus/
 refresh.setImageSize(16, 16)
 refresh.setFixedWidth(30)
 refresh.setFixedHeight(26)
-refresh.setDrawStroke(false)
+refresh.setDrawStroke(true) // Cavalry's own outline, as on the dropdown
 refresh.setBackgroundColor(T.raised)
 refresh.setToolTip('Refresh the comp list')
 refresh.onClick = refreshComps
 compRow.add(refresh)
 
-var status = label('', 11, T.muted)
+// the dropdown follows the active comp; not while an export runs, which may switch comps
+var busy = false
+ui.addCallbackObject({
+	onCompChanged: function () {
+		if (busy) return
+		var i = compIds.indexOf(api.getActiveComp())
+		if (i >= 0) compDrop.setValue(i)
+		else refreshComps()
+	},
+	onSceneChanged: function () {
+		if (!busy) refreshComps()
+	},
+})
 
 function guarded(fn) {
 	ui.setCallbacksActive(false) // no hover/click callbacks into the panel while work runs
+	busy = true
 	try {
 		fn()
 	} catch (e) {
-		status.setText('Failed: ' + ((e && e.message) || e))
-		console.error(SCRIPT_NAME + ': ' + ((e && e.stack) || e))
+		console.error(TAG + 'Failed: ' + ((e && e.stack) || e))
 	} finally {
+		busy = false
 		ui.setCallbacksActive(true)
 	}
+}
+
+function showTab(i) {
+	pages.setPage(i)
+	tabs.setSelected(i)
+	settings.page = i
+	save()
 }
 
 function selectedComp() {
@@ -246,94 +266,10 @@ function exportRange() {
 	if (r.pivots || r.baked) note += (note ? ' · ' : '') + (r.pivots + r.baked) + ' position(s) corrected'
 	if (r.masks) note += (note ? ' · ' : '') + r.masks + ' mask(s) rebuilt'
 	if (r.trackMattes) note += (note ? ' · ' : '') + r.trackMattes + ' track matte(s)'
-	if (r.fills) note += (note ? ' · ' : '') + r.fills + ' fill effect(s)'
+	if (r.fills) note += (note ? ' · ' : '') + r.fills + ' fill/blur effect(s)'
 	if (r.outlined) note += (note ? ' · ' : '') + r.outlined + ' stroke(s) drawn as outlines (tapered or gradient)'
 	if (r.warnings && r.warnings.length) note += (note ? '\n' : '') + '⚠ ' + r.warnings.join('\n⚠ ')
 	return { json: r.json, dirs: r.dirs, note: note }
-}
-
-// ---------- preflight page ----------
-
-var preflight = page()
-preflight.add(section('Target players', T))
-var targets = list(160, T)
-PLAYERS.forEach(function (p) {
-	targets.layout.add(
-		toggleRow(p.label, null, settings.targets.indexOf(p.id) >= 0, T, function (on) {
-			settings.targets = settings.targets.filter(function (id) {
-				return id !== p.id
-			})
-			if (on) settings.targets.push(p.id)
-			save()
-		}).widget
-	)
-})
-targets.layout.addStretch()
-preflight.add(targets.widget)
-
-var checkRow = new ui.HLayout()
-checkRow.setSpaceBetween(6)
-checkRow.add(button('Check comp', true, function () {
-	guarded(checkComp)
-}, T).widget)
-checkRow.add(button('Check file…', false, function () {
-	guarded(checkFile)
-}, T).widget)
-preflight.add(checkRow)
-
-var resultsHead = section('Results', T)
-preflight.add(resultsHead)
-var results = list(220, T)
-results.layout.add(label('Check a comp or a file to see what your players can’t show.', 11, T.muted))
-results.layout.addStretch()
-preflight.add(results.widget)
-
-var WORST_COLOR = { fatal: FATAL, dropped: T.warn }
-
-// Fill the results list; returns how many issues stop a target player loading the file.
-function showResults(issues, what) {
-	results.layout.clear()
-	resultsHead.setText('RESULTS · ' + what.toUpperCase())
-	if (!issues.length) results.layout.add(label('Nothing here that your players can’t show.', 11, T.muted))
-	issues.forEach(function (i) {
-		var levels = Object.keys(i.players).map(function (id) {
-			return i.players[id]
-		})
-		var worst = levels.indexOf('fatal') >= 0 ? 'fatal' : levels.indexOf('dropped') >= 0 ? 'dropped' : null
-		var where = i.where.slice(0, 8).join('\n') + (i.where.length > 8 ? '\n…and ' + (i.where.length - 8) + ' more' : '')
-		results.layout.add(
-			row(i.feature.label + (i.where.length > 1 ? '  ×' + i.where.length : ''), describePlayers(i.players) || i.feature.note, T, {
-				titleColor: WORST_COLOR[worst] || T.text,
-				tip: i.feature.note + '\n\n' + where,
-			}).widget
-		)
-	})
-	results.layout.addStretch()
-	return issues.filter(function (i) {
-		return Object.keys(i.players).some(function (id) {
-			return i.players[id] === 'fatal'
-		})
-	}).length
-}
-
-function summary(issues, fatal) {
-	if (!issues.length) return 'Preflight: no problems for your players.'
-	return 'Preflight: ' + issues.length + ' issue' + (issues.length === 1 ? '' : 's') + (fatal ? ', ' + fatal + ' that stop a player loading the file' : '') + '. See the Preflight tab.'
-}
-
-function checkComp() {
-	var comp = selectedComp()
-	if (!comp) return
-	status.setText('Exporting ' + api.getNiceName(comp) + ' to check it…')
-	var issues = checkLottie(exportSelected().json, settings.targets)
-	status.setText(summary(issues, showResults(issues, api.getNiceName(comp))))
-}
-
-function checkFile() {
-	var path = api.presentOpenFile(api.getProjectPath() || api.getDesktopFolder(), 'Check Lottie', 'Lottie JSON (*.json)')
-	if (!path) return
-	var issues = checkLottie(JSON.parse(api.readFromFile(path)), settings.targets)
-	status.setText(summary(issues, showResults(issues, api.getFileNameFromPath(path, true))))
 }
 
 // ---------- export page ----------
@@ -353,10 +289,14 @@ PASSES.forEach(function (p) {
 })
 
 var exportPage = page()
+exportPage.add(compRow)
 
-// preset, then the two choices that depend on where the file is going
+// preset with its detail tight underneath, then the two choices that depend on where the file is going
+var presetGroup = new ui.VLayout()
+presetGroup.setMargins(0, 0, 0, 0)
+presetGroup.setSpaceBetween(2)
 var presetRow = new ui.HLayout()
-presetRow.setMargins(8, 2, 8, 0)
+presetRow.setMargins(0, 0, 0, 0)
 presetRow.setSpaceBetween(6)
 presetRow.add(label('Preset', 12, T.text))
 presetRow.addStretch()
@@ -366,20 +306,34 @@ PRESETS.forEach(function (p) {
 })
 presetDrop.addEntry('Custom')
 presetRow.add(presetDrop)
-exportPage.add(presetRow)
+presetGroup.add(presetRow)
 var presetDetail = label('', 10, T.muted)
-var presetDetailRow = new ui.HLayout()
-presetDetailRow.setMargins(8, 0, 8, 4)
-presetDetailRow.add(presetDetail)
-exportPage.add(presetDetailRow)
+presetGroup.add(presetDetail)
+exportPage.add(presetGroup)
 exportPage.add(choiceRow('format', 'Save as', FORMATS, 'Lottie JSON plays everywhere. dotLottie is the same animation zipped with its images: usually a fifth of the size, for LottieFiles players, the dotLottie runtimes, and lottie-android / lottie-ios. Not lottie-web on its own.'))
 exportPage.add(choiceRow('display', 'Plays at', DISPLAY, 'The size the animation is shown at, compared to the comp. Smaller means less detail is needed, so files get smaller. Pick the largest size it’s ever shown at.'))
 
 // Advanced: everything a preset sets, rebuilt whenever a preset changes it
 var advHead = row('', null, T, { tip: 'Every option the presets set. Changing one makes the preset Custom.' })
 exportPage.add(advHead.widget)
+// baking and accuracy sit above the list, on the page's edges; a Container so they hide with it
+var advTopLayout = new ui.VLayout()
+advTopLayout.setMargins(0, 0, 0, 0)
+advTopLayout.setSpaceBetween(6)
+var advTop = new ui.Container()
+advTop.setLayout(advTopLayout)
+exportPage.add(advTop)
 var adv = list(250, T)
 exportPage.add(adv.widget)
+var deselectAll = button('Deselect all', false, function () {
+	ADVANCED.forEach(function (key) {
+		settings[key] = false
+	})
+	save()
+	buildAdvanced()
+	showPreset()
+}, T).widget
+exportPage.add(deselectAll)
 
 function showPreset() {
 	var i = currentPreset()
@@ -389,7 +343,8 @@ function showPreset() {
 }
 
 function buildAdvanced() {
-	adv.layout.clear() // rebuilt, not reparented (Easey: reparenting rows breaks them)
+	adv.clear() // rebuilt, not reparented (Easey: reparenting rows breaks them)
+	advTopLayout.clear()
 	var bake = new ui.DropDown()
 	// Labels follow BAKE_MODES order.
 	;['Baking: use each layer’s setting', 'Baking: automatic for every layer', 'Baking: shapes every frame', 'Baking: shapes and colours every frame', 'Baking: one layer per frame (largest)', 'Baking: freeze, no animation'].forEach(function (l) {
@@ -401,27 +356,21 @@ function buildAdvanced() {
 		settings.bakeMode = bake.getValue()
 		save()
 	}
-	adv.layout.add(bake)
-	adv.layout.add(choiceRow('accuracy', 'Accuracy', ACCURACY, 'The most anything may move from the original, in pixels on screen. Balanced can’t be seen; Smallest can, just, on sharp edges up close.', showPreset))
+	advTopLayout.add(bake)
+	advTopLayout.add(choiceRow('accuracy', 'Accuracy', ACCURACY, 'The most anything may move from the original, in pixels on screen. Balanced can’t be seen; Smallest can, just, on sharp edges up close.', showPreset))
 	ADVANCED.forEach(function (key) {
 		var t = ROW_TEXT[key] || [key, '', '']
-		adv.layout.add(optionRow(key, t[0], t[1], t[2], showPreset))
+		adv.add(optionRow(key, t[0], t[1], t[2], showPreset))
 	})
-	adv.layout.add(button('Deselect all', false, function () {
-		ADVANCED.forEach(function (key) {
-			settings[key] = false
-		})
-		save()
-		buildAdvanced()
-		showPreset()
-	}, T).widget)
-	adv.layout.addStretch()
+	adv.end()
 }
 
 function showAdvanced() {
 	advHead.title.setText((settings.advancedOpen ? '▾  ' : '▸  ') + 'Advanced')
 	// ScrollView has no setHidden, and inside a Container it stops rendering: collapse it instead
 	adv.widget.setFixedHeight(settings.advancedOpen ? 250 : 0)
+	advTop.setHidden(!settings.advancedOpen)
+	deselectAll.setHidden(!settings.advancedOpen)
 }
 advHead.widget.onMousePress = function () {
 	settings.advancedOpen = !settings.advancedOpen
@@ -457,41 +406,72 @@ exportPage.addStretch() // pack rows at the top; the PageView is as tall as its 
 // ---------- report page ----------
 
 var reportPage = page()
-var reportHead = section('Last export', T)
-reportPage.add(reportHead)
-var reportList = list(380, T)
-reportList.layout.add(label('Export or optimise a file to see what each step saved.', 11, T.muted))
-reportList.layout.addStretch()
+var reportList = list(0, T)
+reportList.add(label('Export a comp or optimise a file to see a report.', 11, T.muted))
+reportList.end()
 reportPage.add(reportList.widget)
 reportPage.addStretch()
+
+var DANGER = { bg: '#833636', ink: '#ffffff', icon: 'warning', iconColor: '#ff8e8e' }
 
 var PASS_LABEL = {}
 PASSES.forEach(function (p) {
 	PASS_LABEL[p.id] = p.label
 })
 
-// report: optimise()'s [{id, bytes, changes}], plus lines for the saved files
-function showReport(name, report, saved) {
-	reportHead.setText('LAST EXPORT · ' + name.toUpperCase())
-	reportList.layout.clear()
-	var first = report[0].bytes, last = report[report.length - 1].bytes
-	reportList.layout.add(row(kb(first) + ' → ' + kb(last), Math.round(100 - (100 * last) / first) + '% smaller as JSON', T).widget)
-	saved.forEach(function (line) {
-		reportList.layout.add(row(line, null, T).widget)
-	})
-	reportList.layout.add(label('What each step saved', 10, T.muted))
-	for (var i = 1; i < report.length - 1; i++) {
-		var r = report[i], saving = report[i - 1].bytes - r.bytes
-		if (!r.changes && !saving) continue
-		reportList.layout.add(row(PASS_LABEL[r.id] || r.id, (saving >= 0 ? '−' : '+') + kb(Math.abs(saving)) + ' · ' + r.changes + ' change' + (r.changes === 1 ? '' : 's'), T).widget)
+// report: optimise()'s [{id, bytes, changes}]; saved: the files written; issues: checkLottie's
+function showReport(name, report, saved, issues) {
+	reportList.clear()
+	var first = report[0].bytes,
+		last = report[report.length - 1].bytes
+	var text = new ui.VLayout()
+	text.setMargins(0, 0, 0, 0)
+	text.setSpaceBetween(3)
+	text.add(label(name, 12, T.text, 500))
+	text.add(label(kbPair(first, last) + ' (' + Math.round(100 - (100 * last) / first) + '% smaller)', 12, T.mix(T.bg, T.text, 0.6)))
+	var head = new ui.HLayout()
+	head.setMargins(0, 0, 0, 0)
+	head.setSpaceBetween(6)
+	var iconCol = new ui.VLayout() // the icon sits on the first line, not centred on both
+	iconCol.setMargins(0, 2, 0, 0)
+	iconCol.add(icon('file', T.accent, T.bg))
+	iconCol.addStretch()
+	var iconHost = new ui.Container() // fixed width: a bare layout takes half the row
+	iconHost.setLayout(iconCol)
+	iconHost.setFixedWidth(11)
+	head.add(iconHost)
+	head.add(text) // no stretch: a squeezed Label wraps
+	reportList.layout.add(head)
+	reportList.layout.addSpacing(14)
+	if (issues.length) {
+		reportList.add(section('Warnings', T))
+		reportList.layout.addSpacing(6)
+		issues.forEach(function (i) {
+			var where = i.where.slice(0, 8).join('\n') + (i.where.length > 8 ? '\n…and ' + (i.where.length - 8) + ' more' : '')
+			var o = { tip: i.feature.note + '\n\n' + where }
+			for (var k in DANGER) o[k] = DANGER[k]
+			reportList.add(row(i.feature.label + (i.where.length > 1 ? '  ×' + i.where.length : ''), describePlayers(i.players) || i.feature.note, T, o).widget)
+		})
+		reportList.layout.addSpacing(10)
 	}
-	reportList.layout.addStretch()
+	reportList.add(section('Optimised', T)) // a label ends the warnings: their last row takes the bottom corners
+	reportList.layout.addSpacing(6)
+	for (var i = 1; i < report.length - 1; i++) {
+		var r = report[i], before = report[i - 1].bytes
+		if (!r.changes && before === r.bytes) continue
+		reportList.add(row(PASS_LABEL[r.id] || r.id, kbPair(before, r.bytes) + ' · ' + r.changes + ' change' + (r.changes === 1 ? '' : 's'), T, { tip: saved.join('\n') }).widget)
+	}
+	reportList.end(false)
 }
 
 // ---------- run ----------
 
 var kb = function (n) {
 	return (n / 1024).toFixed(1) + ' KB'
+}
+// "1720.1 → 30.8 KB"
+var kbPair = function (a, b) {
+	return (a / 1024).toFixed(1) + ' → ' + kb(b)
 }
 
 function passSettings() {
@@ -505,7 +485,7 @@ function passSettings() {
 	return o
 }
 
-// Optimise, pack images, write, then preflight the result for the selected players.
+// Optimise, pack images, write, then check the result against every player.
 // dirs: folders the file's images can be found in.
 function optimiseAndWrite(json, out, extra, dirs) {
 	var ps = passSettings()
@@ -523,7 +503,7 @@ function optimiseAndWrite(json, out, extra, dirs) {
 		var bytes = zip([{ name: 'manifest.json', data: utf8(JSON.stringify(manifest)) }, { name: 'a/' + id + '.json', data: utf8(serialise(lj, fmtOpts)) }].concat(files))
 		var lottiePath = out.replace(/\.json$/i, '') + '.lottie'
 		if (!api.writeEncodedToBinaryFile(lottiePath, base64(bytes))) {
-			status.setText('Could not write ' + lottiePath)
+			console.error(TAG + 'Could not write ' + lottiePath)
 			return
 		}
 		saved.push(api.getFileNameFromPath(lottiePath, true) + ' ' + kb(bytes.length))
@@ -537,27 +517,28 @@ function optimiseAndWrite(json, out, extra, dirs) {
 		if (pack.jpeg) notes.push(pack.jpeg + ' as JPEG')
 		if (pack.missing) notes.push(pack.missing + ' image(s) not found')
 		if (!api.writeToFile(out, result.text, true)) {
-			status.setText('Could not write ' + out)
+			console.error(TAG + 'Could not write ' + out)
 			return
 		}
 		saved.unshift(api.getFileNameFromPath(out, true) + ' ' + kb(result.text.length) + ' (' + kb(gzipSize(result.text)) + ' gzipped)')
 	}
 	result.report[result.report.length - 1].bytes = result.text.length
-	if (notes.length) extra = (extra || []).concat([notes.join(' · ')])
-	var r = result.report
-	var issues = checkLottie(result.json, settings.targets)
-	var lines = (extra || []).concat([
-		kb(r[0].bytes) + ' → ' + kb(r[r.length - 1].bytes) + ' JSON (' + Math.round(100 - (100 * r[r.length - 1].bytes) / r[0].bytes) + '% smaller) · saved ' + saved.join(', '),
-		summary(issues, showResults(issues, api.getFileNameFromPath(out, true))),
-	])
-	status.setText(lines.join('\n'))
-	showReport(api.getFileNameFromPath(out, true), r, saved)
-	var changed = r.filter(function (x) {
-		return x.changes
+	// warnings to the console one per line; other notes go in the report
+	;(extra || []).concat(notes).join('\n').split('\n').forEach(function (n) {
+		if (!n) return
+		if (/^⚠|not found/.test(n)) console.warn(TAG + n.replace(/^⚠\s*/, ''))
+		else console.log(TAG + n)
 	})
-	console.log(SCRIPT_NAME + ': ' + lines.join(' | ') + ' | passes: ' + changed.map(function (x) {
-		return x.id + ' ' + x.changes
-	}).join(', '))
+	var r = result.report
+	var name = api.getFileNameFromPath(out, true)
+	var issues = checkLottie(result.json) // every player
+	showReport(name, r, saved, issues)
+	var first = r[0].bytes,
+		last = r[r.length - 1].bytes
+	var line = 'Saved. ' + kbPair(first, last) + ' (' + kb(gzipSize(result.text)) + ' gzipped) - ' + Math.round(100 - (100 * last) / first) + '% smaller!'
+	if (issues.length) console.warn(TAG + 'Issues found - check Report tab. ' + line)
+	else console.log(TAG + line)
+	showTab(1)
 }
 
 function runOptimiseFile() {
@@ -572,7 +553,6 @@ function runExport() {
 	var out = api.presentSaveFile(api.getProjectPath() || api.getDesktopFolder(), 'Export Lottie', 'Lottie JSON (*.json)', api.getNiceName(comp) + '.json')
 	if (!out) return
 	if (!/\.json$/i.test(out)) out += '.json'
-	status.setText('Exporting…')
 	var exported = exportSelected()
 	optimiseAndWrite(exported.json, out, exported.note ? [exported.note] : [], exported.dirs)
 }
@@ -581,33 +561,29 @@ function runExport() {
 
 // PageView, not TabView: TabView can't be styled, so the strip drives the pages (Easey).
 var pages = new ui.PageView()
-pages.add(preflight)
 pages.add(exportPage)
 pages.add(reportPage)
 var tabs = tabStrip(
 	[
-		{ label: 'Preflight', icon: 'preflight' },
 		{ label: 'Export', icon: 'export' },
 		{ label: 'Report', icon: 'report' },
 	],
 	function (i) {
 		pages.setPage(i)
-		settings.tab = i
+		settings.page = i
 		save()
 	},
 	T
 )
-var startTab = settings.tab === 1 || settings.tab === 2 ? settings.tab : 0
+var startTab = settings.page === 1 ? 1 : 0
 pages.setPage(startTab)
 tabs.setSelected(startTab)
 
 var root = new ui.VLayout()
-root.setMargins(4, 4, 4, 4)
+root.setMargins(8, 8, 8, 8)
 root.setSpaceBetween(8)
 root.add(tabs.widget)
-root.add(compRow)
 root.add(pages) // a PageView inside a Container stops rendering, so it goes straight in
-root.add(status)
 root.addStretch()
 
 ui.setTitle(SCRIPT_NAME)

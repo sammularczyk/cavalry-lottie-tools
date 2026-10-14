@@ -1,4 +1,5 @@
 import * as kit from "./modules/ui/kit.js";
+import { checkForUpdate } from "./modules/updateChecker.js";
 
 // Lottie Importer for Cavalry
 // Imports Lottie JSON animations as native Cavalry layers.
@@ -13,82 +14,12 @@ import * as kit from "./modules/ui/kit.js";
 // Check Update from Github
 var GITHUB_REPO = "sammularczyk/cavalry-lottie-tools";
 var scriptName = "Lottie Importer";
-var currentVersion = "1.1.0";
-
-function compareVersions(v1, v2) {
-    var parts1 = v1.split('.').map(function(n) { return parseInt(n, 10) || 0; });
-    var parts2 = v2.split('.').map(function(n) { return parseInt(n, 10) || 0; });
-    for (var i = 0; i < Math.max(parts1.length, parts2.length); i++) {
-        var num1 = parts1[i] || 0;
-        var num2 = parts2[i] || 0;
-        if (num1 > num2) return 1;
-        if (num1 < num2) return -1;
-    }
-    return 0;
-}
-
-function checkForUpdate(githubRepo, scriptName, currentVersion, callback) {
-    var now = new Date().getTime();
-    var oneDayAgo = now - (24 * 60 * 60 * 1000);
-    var shouldFetchFromGithub = true;
-    var cachedLatestVersion = null;
-    if (api.hasPreferenceObject(scriptName + "_update_check")) {
-        var prefs = api.getPreferenceObject(scriptName + "_update_check");
-        cachedLatestVersion = prefs.latestVersion;
-        if (prefs.lastCheck && prefs.lastCheck > oneDayAgo) {
-            shouldFetchFromGithub = false;
-        }
-    }
-    if (!shouldFetchFromGithub && cachedLatestVersion) {
-        var updateAvailable = compareVersions(cachedLatestVersion, currentVersion) > 0;
-        if (updateAvailable) {
-            console.warn(scriptName + ' ' + cachedLatestVersion + ' update available (you have ' + currentVersion + '). Download at github.com/' + githubRepo);
-            if (callback) callback(true, cachedLatestVersion);
-        } else {
-            if (callback) callback(false);
-        }
-        return;
-    }
-    try {
-        var path = "/" + githubRepo + "/main/versions.json";
-        var client = new api.WebClient("https://raw.githubusercontent.com");
-        client.get(path);
-        if (client.status() === 200) {
-            var versions = JSON.parse(client.body());
-            var latestVersion = versions[scriptName];
-            if (!latestVersion) {
-                console.warn("Version check: Script name '" + scriptName + "' not found in versions.json");
-                if (callback) callback(false);
-                return;
-            }
-            if (latestVersion.indexOf && latestVersion.indexOf('v') === 0) {
-                latestVersion = latestVersion.substring(1);
-            }
-            api.setPreferenceObject(scriptName + "_update_check", {
-                lastCheck: new Date().getTime(),
-                latestVersion: latestVersion
-            });
-            var updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
-            if (updateAvailable) {
-                console.warn(scriptName + ' ' + latestVersion + ' update available (you have ' + currentVersion + '). Download at github.com/' + githubRepo);
-                if (callback) callback(true, latestVersion);
-            } else {
-                if (callback) callback(false);
-            }
-        } else {
-            console.log("Version check: Unable to fetch versions.json (HTTP " + client.status() + ")");
-            if (callback) callback(false);
-        }
-    } catch (e) {
-        console.log("Version check: Error - " + e.message);
-        if (callback) callback(false);
-    }
-}
+var currentVersion = "1.1.0"; // versions.json: each script has its own
+var TAG = "[" + scriptName + "] ";
 
 ui.setTitle("Lottie Importer");
 
 var T = kit.theme();
-var statusLabel = kit.label("Choose a Lottie .json or .lottie file to import into the active composition.", 11, T.muted);
 var importButton = kit.button("Import Lottie…", true, function() {
     ui.setCallbacksActive(false); // no hover/click callbacks into the panel while the import runs
     try { runImport(); } finally { ui.setCallbacksActive(true); }
@@ -103,7 +34,6 @@ function runImport() {
     );
 
     if (!filePath || filePath === "") {
-        statusLabel.setText("Import cancelled.");
         return;
     }
 
@@ -113,12 +43,12 @@ function runImport() {
         jsonString = source.json;
         lottieSourceDir = source.dir;
     } catch (e) {
-        statusLabel.setText("Failed to read file: " + e.message);
+        console.error(TAG + "Failed to read file: " + e.message);
         return;
     }
 
     if (!jsonString) {
-        statusLabel.setText("Failed to read file.");
+        console.error(TAG + "Failed to read file.");
         return;
     }
 
@@ -126,36 +56,29 @@ function runImport() {
     try {
         lottie = JSON.parse(jsonString);
     } catch (e) {
-        statusLabel.setText("Invalid JSON: " + e.message);
+        console.error(TAG + "Invalid JSON: " + e.message);
         return;
     }
 
-    statusLabel.setText("Importing…");
     try {
         var count = importLottie(lottie);
-        statusLabel.setText("Imported " + count + " shape layer(s).");
+        console.log(TAG + "Imported " + count + " shape layer(s).");
     } catch (e) {
         var errMsg = (e && e.message) ? e.message : String(e);
-        if (e && e.stack) console.log("Lottie import stack: " + e.stack);
-        console.log("Lottie import error: " + errMsg);
-        statusLabel.setText("Error: " + errMsg);
+        console.error(TAG + "Import failed: " + ((e && e.stack) || errMsg));
     }
 }
 
 var root = new ui.VLayout();
-root.setMargins(4, 4, 4, 4);
+root.setMargins(8, 8, 8, 8);
 root.setSpaceBetween(8);
 root.add(importButton.widget);
-root.add(statusLabel);
 root.addStretch();
 ui.add(root);
+ui.setBackgroundColor(T.bg);
 ui.setMinimumWidth(320);
 
-checkForUpdate(GITHUB_REPO, scriptName, currentVersion, function(updateAvailable, newVersion) {
-    if (updateAvailable) {
-        statusLabel.setText("Update " + newVersion + " available!");
-    }
-});
+checkForUpdate(GITHUB_REPO, scriptName, currentVersion); // warns in the console
 
 ui.show();
 

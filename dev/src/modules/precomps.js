@@ -1039,12 +1039,18 @@ function sourceShapes(id) {
 // group draws over the group's render; Lottie effects on a parent don't reach its children,
 // so it goes on every drawing layer under the filtered one (same as masks).
 
-// Fill filters on a scene layer, in order: [fill id].
-function sceneFills(id) {
+// Gaussian and Fast Blur filters become Gaussian Blur effects the same way. lottie-web blurs with
+// sigma = Blurriness * 0.3; Cavalry's Gaussian Blur with sigma = amount * 0.3 and Fast Blur with
+// sigma = amount (measured from rendered edges), so Blurriness = amount * scale.
+const BLUR_SCALE = { 'sceneGroup::gaussianBlurFilter': 1, blurFilter: 1 / 0.3 }
+
+// Fill and blur filters on a scene layer, in order: [{ f, kind }].
+function sceneFilters(id) {
 	return (api.getInConnectedAttributes(id) || [])
 		.filter((a) => /^filters\.\d+$/.test(a))
 		.map((a) => String(api.getInConnection(id, a)).replace(/\.id$/, ''))
-		.filter((f) => api.getLayerType(f) === 'fill')
+		.map((f) => ({ f, kind: api.getLayerType(f) === 'fill' ? 'fill' : BLUR_SCALE[api.getLayerType(f)] ? 'blur' : null }))
+		.filter((x) => x.kind)
 }
 
 // fillColor as Lottie [r, g, b, 1] (0..1) and its alpha as 0..1; animated when keyed.
@@ -1094,6 +1100,13 @@ function fillEffect(color, opacity) {
 	]
 	ef.forEach((e, i) => (e.ix = i + 1))
 	return { ty: 21, nm: 'Fill', np: 9, mn: 'ADBE Fill', ix: 1, en: 1, ef }
+}
+
+// Blur Dimensions: 1 both, 2 horizontal, 3 vertical.
+export function blurEffect(blurriness, dims) {
+	const p = (ty, nm, n, v) => ({ ty, nm, mn: 'ADBE Gaussian Blur 2-000' + n, ix: n, v })
+	const ef = [p(0, 'Blurriness', 1, blurriness), p(7, 'Blur Dimensions', 2, { a: 0, k: dims }), p(7, 'Repeat Edge Pixels', 3, { a: 0, k: 0 })]
+	return { ty: 29, nm: 'Gaussian Blur', np: 5, mn: 'ADBE Gaussian Blur 2', ix: 1, en: 1, ef }
 }
 
 // Cavalry writes some static values as an animated property with one key, which stops
@@ -1361,7 +1374,15 @@ export function exportWithPrecomps(compId, opts = {}) {
 		for (const L of exported.layers.slice().sort((a, b) => depth(b) - depth(a))) {
 			const id = sceneOf.get(L)
 			if (!id) continue
-			for (const f of sceneFills(id)) {
+			for (const { f, kind } of sceneFilters(id)) {
+				if (kind === 'blur') {
+					const effect = sceneBlur(comp, f, id, from, to)
+					for (const D of drawingUnder(exported.layers, L)) {
+						D.ef = (D.ef || []).concat(JSON.parse(JSON.stringify(effect)))
+						fills++
+					}
+					continue
+				}
 				const anim = api.getAnimatedAttributes(f) || []
 				const still = api.get(f, 'fillColor')
 				const driven = drivenAttr(f, 'fillColor') && sampleAttr(comp, f, 'fillColor', from, to)
@@ -1376,6 +1397,31 @@ export function exportWithPrecomps(compId, opts = {}) {
 				}
 			}
 		}
+	}
+
+	// A blur filter's amount as a Gaussian Blur effect. Lottie has one Blurriness:
+	// x == y blurs both ways, a zero axis blurs the other only; otherwise x is used.
+	function sceneBlur(comp, f, id, from, to) {
+		const anim = api.getAnimatedAttributes(f) || []
+		const scale = BLUR_SCALE[api.getLayerType(f)]
+		const axis = (c) => (anim.indexOf('amount.' + c) >= 0 ? sceneKeys(f, 'amount.' + c, (v) => v * scale) : { a: 0, k: api.get(f, 'amount')[c] * scale })
+		let x = axis('x'),
+			y = axis('y')
+		if (drivenAttr(f, 'amount')) {
+			const vals = sampleAttr(comp, f, 'amount', from, to)
+			const k = (c) => {
+				const P = frameKeys(vals, from, (v) => [v[c] * scale])
+				if (!P.a) P.k = P.k[0]
+				return P
+			}
+			x = k('x')
+			y = k('y')
+		}
+		const same = JSON.stringify(x) === JSON.stringify(y)
+		if (!same && !y.a && y.k === 0) return blurEffect(x, 2)
+		if (!same && !x.a && x.k === 0) return blurEffect(y, 3)
+		if (!same) warnings.push('The ' + api.getNiceName(f) + ' filter on ' + api.getNiceName(id) + ' blurs x and y by different amounts; Lottie blurs both by its x amount')
+		return blurEffect(x, 1)
 	}
 
 	// Check every layer's anchor against the scene and correct or bake its position.
