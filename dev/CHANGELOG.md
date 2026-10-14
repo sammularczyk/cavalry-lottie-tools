@@ -1,80 +1,13 @@
 # Changelog
 
+## Lottie Optimiser 1.3.0 (2026-10-08)
+- Optimisation improvements
+- UI updates
+
 ## Lottie Optimiser 1.2.0 (2026-10-08)
-- Exporter: text animated by an Auto-Animate with Opacity (Fade Up/Down) or Visibility (Appear) mode now fades in or appears glyph by glyph (Cavalry's writer dropped both, so every glyph showed from the first frame). Delays come from the Auto-Animate's Time Offset (automatic, negative, normal order, per word or character); other setups read each glyph's start from its baked motion, so need a position, scale or rotation mode too.
-- Exporter: exports the comp's playback range when it's narrower than the comp (a 0–2400 comp played 0–184 exported 2400 frames).
-- Exporter: fills and strokes coloured through a Shader Array export the shader it shows, including one picked by a precomp override on the comp reference (Cavalry's writer wrote the bare colour, often transparent or white). References that pick different shaders get a precomp each.
-- Exporter: radial gradients export as the ellipse Cavalry draws, from the shader's Scale, Rotation, Size Ratio and the shape's height (Cavalry's writer wrote a circle half the width across, so the gradient ended early). Drawn as a circle in a scaled, rotated group, with the path counter-transformed.
-- Exporter: linear gradients include the shader's Offset (dropped by Cavalry's writer).
-- Exporter: gradient strokes export (Cavalry's writer wrote them white), built from the shader's stops.
-- Optimiser panel: "Gradient strokes as fills (Canva)" under Advanced, on by default: draws gradient strokes as filled outlines with the gradient, since Canva refuses gradient strokes but takes gradient fills. Off keeps real gradient strokes, smaller and exact, for other players.
-- Exporter: tapered strokes (Tapered Width, custom width curve) export as filled outlines, one key per frame, matching Cavalry's taper as measured against its renders: the curve along the whole contour, trims and wrapping Travel, round caps. Lottie strokes have one width, and none of Cavalry's bakes outline them. Plain strokes stay strokes.
-- Exporter: a matte source that has its own matte keeps it (a logo wiped on by a stroke and used as a gradient's matte showed unwiped).
-- Exporter: keys with speed/influence easing that Cavalry's writer exports on a different curve take Cavalry's value on every frame, then keyframe fitting thins them (a group drifted 9 px mid-move, pushing a logo out of its matte).
-- Exporter: the scene's eases go on every copy of a repeated stroke or trim, not just the first.
-- Optimiser: "Remove doubled fills and strokes" also removes the second trim Cavalry writes on trimmed strokes (it trimmed the path twice) and the repeated copy of the stroke.
-- Optimiser panel: the comp list is alphabetical, the same height as the refresh button, which uses Cavalry's own reload icon.
+- Added support for **Tapered Strokes**, **Auto-Animate deformer** and **Shader Arrays**
+- Improved fidelity of gradients and added gradient stroke support
+- Updated UI
 
 ## Lottie Optimiser 1.0.0, Lottie Importer 1.1.0 (2026-10-02)
-- Exporter: track mattes on groups are no longer exported: Cavalry draws a group's children unmatted (tested hidden and visible sources, inverted, nested groups), so the export clipped what Cavalry doesn't. A warning names the group.
-- Exporter: vertical skew exports, as do both skews at once and skew under non-uniform scale. Cavalry skews before scaling and lottie-web after, so rotation, scale and skew are rebuilt together (checked against Cavalry); keyed or driven ones are sampled every frame.
-- Importer: compound shapes and animated rectangles/ellipses under a moving group keep its animation too.
-- Optimiser: "Share identical layers as one precomp" also shares copies that are track-matted, masked or carry effects; each copy keeps its own matte, masks, effects and transform (mirrored copies included). The CTV intro went from 278 KB to 253 KB, drawing the same in lottie-web.
-- Importer: animated shape-group transforms import (they froze at their first value). A path under one moving group keeps that group's keys and eases on its own transform, and stays editable; anything else is baked to the path on every frame. Animated group opacity is keyed on the shape.
-- Exporter: driven (connected) opacity and Fill filter colours are sampled every frame instead of read at the current one.
-- Exporter: images from different comps no longer clash when they share an id or file name (the wrong image showed in one of them).
-- Exporter: matte bounds padding (for straight stroked lines) follows animated groups instead of their first frame.
-- Exporter: no more "Attribute not found: matteMode" errors in the console for filters and behaviours.
-- Player check: flags motion-path keys whose ease dips below 0, which lottie-web jumps to the end of.
-- Both scripts check for updates from sammularczyk/cavalry-lottie-tools.
-- Optimiser: fitted motion paths never use an ease that dips below 0. lottie-web jumps a motion path to its segment's end whenever progress goes negative, so particles snapped across the screen (up to 24 px in the flourish).
-- Optimiser panel: "Experimental: refit eased keys" under Advanced (off in every preset) lets keyframe fitting replace keys that already have eases, checked every half frame. The 596-particle flourish went from 2.7 MB to 1.34 MB (0.48 px at most); optimising took 4 s instead of 0.6 s.
-- Optimiser: "Turn baked moving shapes back into transforms" also takes eased keys several frames apart when the shape only moves and scales (exact: that's how position and scale interpolate), shapes that grow from a single point, and leaves a turn too small to see as a still rotation. A 596-particle flourish went from 3.0 MB to 2.7 MB.
-- Optimiser: rounding keeps more decimals on keys either side of an ease that overshoots; Cavalry writes ease handles relative to the change, so a key pair 0.01 apart with a ×128 handle swung 7.5 px off once rounded.
-- Exporter: keys keep the scene's eases where Cavalry's writer clamped them to 0–1, so overshooting eases overshoot again (an animated corner radius went straight to its end value, and the star cut from those corners didn't meet them). Corner radius is now matched to its scene keys too.
-- Optimiser: "Simplify paths" now works on animated paths too (keys that morph lose the same points; keys after a hold simplify on their own), and refits baked polylines as curves. A baked 434-point superellipse in one Extreme export went to 15 points, taking the file from 624 KB to 278 KB.
-- Exporter: fills use Even Odd when the shape does (Cavalry's default; its writer leaves the rule out, so players filled nonzero and a star cut from a square drew as a solid square).
-- Exporter: skew exports (Cavalry's writer always writes 0), and positions are corrected with it, so content under a skewed group is no longer tilted wrong and shifted.
-- Exporter: straight stroked lines under a track matte get an invisible rect over their stroked bounds; lottie-web sizes a matte's mask from the path's bounds, so a perfectly straight line vanished.
-- Exporter: Fill filters (dropped by Cavalry's writer) export as After Effects Fill effects, the way bodymovin writes them, with their colour keys; a filter on a group goes on every layer under it. Drawn by lottie-web SVG, ThorVG and Skottie; the player check flags the rest.
-- Exporter: every track matte exports as a real Lottie track matte (masks under an animated parent drifted between frames, so a bar stretched past its matte on fast screens).
-- Exporter: track mattes that a mask can't stand in for (stroked sources, luma, alpha) export as real Lottie track mattes: the source (shown briefly for the export if hidden) becomes a matte precomp above each layer it clips.
-- Exporter: a group's in/out frames now limit its children, as in Cavalry (Lottie parenting doesn't).
-- Exporter: geometry track mattes (Stencil / Silhouette) become Lottie add / subtract masks from the matte's shapes, sampled from the scene; luma/alpha mattes are reported.
-- Optimiser: paths whose point count changes between keys are padded to one count and held where it changes; lottie-web otherwise corrupts its path buffers and blanks other layers.
-- Optimiser: keys and layers never on screen go: each comp's visible frames are worked out through precomp time offsets, stretch and time remapping (nested too), and parents keep keys while any child is visible.
-- Optimiser panel: Safe / Smaller / Extreme presets; Save as and Plays at up front; the rest under a collapsible Advanced section with Deselect all. Lossless steps are always on and hidden.
-- Optimiser panel: Report tab with what each step saved.
-- Optimiser: default transform values (0 position/anchor, 100% scale and opacity, no rotation) are left out; every player fills them in. A shape group keeps its opacity (lottie-web canvas needs it).
-- Optimiser: save as dotLottie (.lottie, version 2) with images packed in i/, or both; zipped in plain JS, so no shell tools or trust prompt.
-- Optimiser: the summary shows the gzipped size a web server would send.
-- Optimiser: "Remove doubled fills and strokes" fixes Cavalry writing every path's paint twice (see-through colours rendered too strong); matches Cavalry exactly and saves a fifth of a typical file.
-- Optimiser: "Merge neighbouring shape layers" and "Share fills and strokes between shapes" restructure Cavalry's one-layer-per-shape output the way After Effects files are built; lossless.
-- Optimiser: baked keyframes are replaced with a few fitted, eased keys (checked every half frame); path morphs fit with one shared ease and curved motion becomes motion paths.
-- Optimiser: "Simplify paths" removes points that don't change an outline, refitting curves either side.
-- Optimiser: baked squash and stretch is recovered as non-uniform scale, as well as move, turn and scale.
-- Optimiser: Accuracy (Exact / Balanced / Small file / Smallest) and Plays at (full / half / quarter size) set every tolerance in on-screen pixels, per layer from how big it's drawn.
-- Optimiser: images can be embedded in the JSON (on by default) and opaque PNGs saved as JPEG (macOS).
-- Lottie Importer moved here from Canvalry-scripts.
-- Importer: Normal blend mode maps to Cavalry's 3 (0 was ignored); Lottie Add maps to Plus Lighter.
-- Importer: scalar ease tangents no longer produce NaN handles; spatial samples use an exact bezier solve.
-- Importer: opens `.lottie` files (dotLottie v1 and v2).
-- Importer: loads external images (`u` + `p`), not just embedded ones; embedded images are detected by their `data:` prefix.
-- Exporter: comp references export as real precomps (each comp once, with its time offset and time remapping), fixing nested comps that Cavalry's writer exports frozen.
-- Exporter: every layer is checked against the scene and positions around pivots corrected (Cavalry's writer shifts them by rotation × scale × pivot at whatever frame the comp last showed, or flips the anchor when the transform is connected).
-- Exporter: guide layers are left out; one-key animated properties are written static (they stop lottie-web drawing the layer).
-- Exporter: clipping masks on groups (dropped by Cavalry's writer) are rebuilt on every drawing layer under the group, sampled from the scene.
-- Exporter: layers running to their comp's last frame no longer vanish on it (Cavalry's end frame is inclusive, Lottie's exclusive), fixing a one-frame flash each time a precomp loops.
-- Exporter: parent opacity is folded into children (Cavalry children inherit it, Lottie children don't), and group opacity is read from the scene (the writer drops it).
-- Exporter: static rotation and scale are taken from the scene (the writer exported some comp references unrotated).
-- Optimiser: "Hold one-frame jumps" (on by default) holds the key before a value that jumps between adjacent frames, so players drawing in-between frames don't slide it; optional "Hold every frame-by-frame key" steps exactly like Cavalry's frames.
-- Exporter: hold (step) keys are restored from the scene; Cavalry's writer exports them as eases, so values Cavalry holds then snaps (the dreidel lines' stroke width) faded across the gap.
-- Optimiser: still group layers fold into their children ("Fold still group layers").
-- Exporter: keyframed transforms the writer baked per frame use the scene's keys and eases instead, when they reproduce the bake on every frame.
-- Optimiser: "Flatten nested shape groups" lifts sole, identity-transform groups into the level above.
-- Renamed Lottie Exporter Pro to Lottie Optimiser.
-- Importer: time remapping (Lottie `tm`) on precomp layers; precomps get their own frame range instead of Cavalry's default.
-- Importer: anchors and precomp/image centring offsets turn with the layer's rotation (rotated precomps landed in the wrong place).
-- Importer: a parent's opacity stays on its own content (Lottie children don't inherit it), and children below their parent in the Lottie stack draw below it.
-- Importer: children separated from their parent by other layers get a transform proxy, so the stack order matches Lottie (hair behind a head).
-- Importer: animated group positions no longer empty the path (NaN); the group's animation itself isn't imported yet.
+Initial release
