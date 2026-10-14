@@ -6,19 +6,13 @@ Lottie import and export for [Cavalry](https://cavalry.studio).
 
 Download above and copy the `.jsc` scripts into Cavalry's Scripts folder.
 
-
-### Lottie Importer
-Import Lottie files as native Cavalry layers.
-
-<img width="317" height="129" alt="Lottie Importer UI" src="https://github.com/user-attachments/assets/28d9f644-8565-4d1f-816a-b05fcd8adab8" />
-
 ### Lottie Optimiser
 
 Export Cavalry comps to Lottie with even higher fidelity and lower file size than other exporters. Saves up to 91% from the default exporter, with higher fidelity.
 
 Customise the settings to get them even smaller, and validate your files against different runtimes.
 
-<img width="381" height="593" alt="Screenshot 2026-10-05 at 12 22 05" src="https://github.com/user-attachments/assets/04f9a57d-a062-43bd-882d-3f1e40c46abf" />
+<img width="454" height="437" alt="image" src="https://github.com/user-attachments/assets/fa74c4d2-d0c0-4116-8cbe-3ac51b964e66" />
 
 
 | Preset | Description |
@@ -29,17 +23,11 @@ Customise the settings to get them even smaller, and validate your files against
 | Custom | Mix and match techniques. |
 
 
+### Lottie Importer
+Import Lottie files as native Cavalry layers.
 
+<img width="432" height="230" alt="image" src="https://github.com/user-attachments/assets/ebe51b65-7cf3-4e42-b519-749cea8a3ab1" />
 
-## Develop
-All dev files live in `dev/`.
-```
-cd dev
-npm install
-npm run dev      # watch build, symlinked into Cavalry's Scripts folder
-npm test         # Node tests for the pure JSON passes
-npm run release  # builds and copies the .jsc files to the repo root
-```
 
 ## License
 MIT
