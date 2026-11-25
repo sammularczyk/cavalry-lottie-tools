@@ -175,14 +175,20 @@ function nominalOffsets(dup, count, warn, name) {
 		return new Array(count).fill(COMP_REF_TIME_SCALE * v)
 	}
 	const driver = String(raw).replace(/\.id$/, '')
+	// Only a stagger can be decoded: other indexed behaviours (random, noise)
+	// serialise with a graph attribute too, but their per-index values come from
+	// a seed and cannot be read from the scene.
+	let driverType = ''
+	try { driverType = api.getLayerType(driver) } catch (e) { driverType = '' }
+	if (driverType !== 'stagger') {
+		warn('The time offset driver of ' + name + ' is not a stagger; its copies export without time offsets')
+		return null
+	}
 	// serialise returns an array of JSON strings (chunks) that must be joined
 	let nodes = null
 	try { nodes = JSON.parse([].concat(api.serialise([driver], false)).join('')) } catch (e) { nodes = null }
 	const attrs = nodes && nodes.nodes && nodes.nodes[0] && nodes.nodes[0].attributes
-	if (!attrs || !attrs.graph) {
-		warn('The time offset driver of ' + name + ' is not a stagger; its copies export without time offsets')
-		return null
-	}
+	if (!attrs || !attrs.graph) return null
 	const sampler = graphSampler(attrs.graph)
 	const min = Number(api.get(driver, 'minimum')), max = Number(api.get(driver, 'maximum'))
 	if (isNaN(min) || isNaN(max)) return null
