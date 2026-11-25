@@ -12,6 +12,7 @@
 // each anchor where Cavalry draws the pivot (see repairPositions).
 
 import { exportComp, compLayers, shaderArrayPicks, fillShader } from './cavalryExport.js'
+import { duplicatorCompRefs } from './duplicatorCompRefs.js'
 import { emptyLike, taperOutlines, widthCurve } from './taper.js'
 
 const isAnimated = (p) => p && Array.isArray(p.k) && p.k.length && typeof p.k[0] === 'object' && 't' in p.k[0]
@@ -1266,6 +1267,25 @@ export function exportWithPrecomps(compId, opts = {}) {
 			sceneOf.set(out, id)
 			return out
 		})
+		// duplicators fed by composition references lose their copies' content in the
+		// bake; export the referenced comp once and swap the bake for precomp layers
+		if (opts.duplicators !== false) {
+			const builtRefs = duplicatorCompRefs(comp, exported, sceneOf, (inner, ref) => {
+				const key = inner + shaderArrayPicks(inner, ref).map((p) => '|' + p.shader).join('')
+				let layers = null
+				if (!cache[key]) {
+					const assetId = 'comp_' + next++
+					cache[key] = assetId
+					const built = build(inner, ref)
+					layers = built.layers
+					assets.push({ id: assetId, nm: api.getNiceName(inner), fr: built.fr, w: built.w, h: built.h, layers: built.layers })
+					for (const a of built.assets || []) if (!assets.some((b) => b.id === a.id)) assets.push(a)
+				}
+				return { id: cache[key], fr: exported.fr, w: compSize(inner)[0], h: compSize(inner)[1], layers }
+			})
+			if (builtRefs.refs) refs += builtRefs.refs
+			for (const w of builtRefs.warnings) warnings.push(w)
+		}
 		// Cavalry's end frame is inclusive, Lottie's op exclusive: layers that run to the comp's
 		// last frame would vanish on it (a one-frame flash each time a precomp loops)
 		const last = api.get(comp, 'endFrame')

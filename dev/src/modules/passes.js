@@ -381,6 +381,57 @@ export function removeDeadLayers(json) {
 	return n
 }
 
+// 6b. Elements whose opacity is zero at EVERY frame can never be seen, so strip
+// them outright: layers with an all-zero ks.o (static or animated), paint items
+// with an all-zero opacity, and groups whose own tr.o is all-zero (their whole
+// subtree multiplies to zero). removeDeadLayers only catches the static case;
+// this fills in the animated one and the paint-level one.
+const isAllZeroOpacity = (o) => {
+	if (!o || o.x) return false
+	if (isAnimated(o)) {
+		const keys = Array.isArray(o.k) ? o.k : []
+		if (!keys.length) return false
+		return keys.every((kf) => {
+			const s = asArray(kf.s)
+			const e = asArray(kf.e != null ? kf.e : (keys[keys.length - 1] && keys[keys.length - 1].s))
+			return s.every((v) => Number(v) === 0) && e.every((v) => Number(v) === 0)
+		})
+	}
+	return asArray(o.k).every((v) => Number(v) === 0)
+}
+
+export function stripZeroOpacity(json) {
+	let n = 0
+	for (const layers of layerLists(json)) {
+		const keep = referencedIndices(layers)
+		for (let i = layers.length - 1; i >= 0; i--) {
+			const L = layers[i]
+			if (L.td || keep.has(L.ind)) continue
+			if (isAllZeroOpacity(L.ks && L.ks.o)) {
+				layers.splice(i, 1)
+				n++
+			}
+		}
+		for (const L of layers)
+			for (const items of shapeLists(L))
+				for (let i = items.length - 1; i >= 0; i--) {
+					const it = items[i]
+					if (!it) continue
+					if (it.ty === 'fl' && isAllZeroOpacity(it.o)) {
+						items.splice(i, 1)
+						n++
+					} else if (it.ty === 'gr' && it.it) {
+						const tr = it.it.find((x) => x && x.ty === 'tr')
+						if (tr && isAllZeroOpacity(tr.o)) {
+							items.splice(i, 1)
+							n++
+						}
+					}
+				}
+	}
+	return n
+}
+
 // 7. Assets nothing references (followed through precomps from the root).
 export function removeUnusedAssets(json) {
 	if (!Array.isArray(json.assets)) return 0
@@ -418,6 +469,119 @@ export function dedupeAssets(json) {
 		for (const L of layers) if (remap.has(L.refId)) L.refId = remap.get(L.refId)
 	json.assets = json.assets.filter((a) => !remap.has(a.id))
 	return remap.size
+}
+
+// 8b. Colour/blink decomposition. The Cavalry exporter writes one precomp per
+// (colour, blink-phase) combination, so N copies that share an expensive animated
+// colour curve but blink on different phases cost N full colour curves. Lottie ref
+// layers carry their own opacity, which multiplies with the asset's internal paint:
+// retarget every member of a colour family to ONE representative asset (its blink
+// forced to static full), and move each ref's blink onto ref.ks.o. The colour curve
+// is then stored once per family instead of once per phase.
+export function decomposeSharedPaints(json) {
+	if (!Array.isArray(json.assets)) return 0
+	let n = 0
+
+	// Index single-layer, single-fill shape assets by byte-identical colour curve.
+	const families = new Map()
+	for (const a of json.assets) {
+		if (!a.layers || a.layers.length !== 1) continue
+		const il = a.layers[0]
+		if (il.ty !== 4 || !il.shapes || il.shapes.length !== 1) continue
+		const root = il.shapes[0]
+		if (root.ty !== 'gr' || !Array.isArray(root.it)) continue
+		const paints = root.it.filter((x) => x.ty === 'fl')
+		if (paints.length !== 1) continue
+		const key = JSON.stringify(paints[0].c)
+		if (!families.has(key)) families.set(key, [])
+		families.get(key).push({ a, il, fl: paints[0] })
+	}
+
+	for (const members of families.values()) {
+		if (members.length < 2) continue
+
+		// One representative keeps the asset slot; the rest become aliases. Prefer a
+		// member whose blink is already static full (cheapest to normalise) else the first.
+		const rep = members.find((m) => m.fl.o && m.fl.o.a === 0 && (m.fl.o.k === 100 || (Array.isArray(m.fl.o.k) && m.fl.o.k[0] === 100))) || members[0]
+		// Members whose blink equals the representative's keep working with no ref
+		// change; they are the ones that make dedupe impossible today but decomposition
+		// pointless for them — leave assets whose blink matches rep's byte-for-byte.
+		const repOSig = JSON.stringify(rep.fl.o)
+
+		// Profitability: rewriting a member's refs costs each ref an opacity curve the
+		// size of that member's blink; the saving is the member's whole inner layer
+		// (geometry + colour curve + its own blink) minus nothing — the ref keeps
+		// existing either way. Compare member layer bytes vs added ref opacity bytes.
+		const refTargets = new Map() // memberId → [refLayers]
+		for (const L of json.layers) {
+			if (L.ty !== 0) continue
+			const m = members.find((mm) => mm.a.id === L.refId)
+			if (m) {
+				if (!refTargets.has(m.a.id)) refTargets.set(m.a.id, [])
+				refTargets.get(m.a.id).push(L)
+			}
+		}
+		let gain = 0
+		let cost = 0
+		for (const m of members) {
+			if (m === rep) continue
+			if (JSON.stringify(m.fl.o) === repOSig) continue // identical twin: plain dedupe, pure gain
+			const refs = refTargets.get(m.a.id) || []
+			if (!refs.length) { gain += JSON.stringify(m.il).length; continue }
+			gain += JSON.stringify(m.il).length
+			cost += JSON.stringify(m.fl.o).length * refs.length
+		}
+		if (gain <= cost) continue
+
+		// Normalise the representative: blink off the asset (static full) so ref
+		// opacity IS the effective opacity. Rep's original refs must inherit the
+		// blink the asset used to carry, and members whose blink EQUALLED rep's
+		// original blink can simply retarget (no ref opacity needed).
+		const repOwnBlink = JSON.parse(JSON.stringify(rep.fl.o))
+		rep.fl.o = { a: 0, k: 100 }
+
+		for (const m of members) {
+			if (m === rep) continue
+			const refs = refTargets.get(m.a.id) || []
+			// A member whose blink equalled rep's original blink: retarget refs with
+			// no ref-opacity change (they saw repOwnBlink before and after).
+			const sameAsRep = JSON.stringify(m.fl.o) === JSON.stringify(repOwnBlink)
+			let unmoved = false
+			for (const L of refs) {
+				L.ks = L.ks || {}
+				const cur = L.ks.o
+				const curIsFull = !cur || (cur.a === 0 && (cur.k === 100 || (Array.isArray(cur.k) && cur.k[0] === 100)))
+				if (sameAsRep || curIsFull) {
+					// Retarget first, then carry the blink. sameAsRep refs keep no extra
+					// opacity — they inherit repOwnBlink via the push-down below; others
+					// take over this member's blink as their own layer opacity.
+					L.refId = rep.a.id
+					if (!sameAsRep) L.ks.o = JSON.parse(JSON.stringify(m.fl.o))
+				} else {
+					// ref already carries opacity (multiplied chains): combining is
+					// unsafe — leave this ref pointed at the original member asset.
+					unmoved = true
+				}
+			}
+			// Drop the member asset only when every ref actually moved. If some ref
+			// kept its own opacity, the member asset must stay alive for it.
+			if (!unmoved) {
+				json.assets = json.assets.filter((x) => x !== m.a)
+				n++
+			}
+		}
+		// rep's original refs saw blink = repOwnBlink inside the asset; the asset is
+		// now static full → push the blink onto refs that don't carry one.
+		if (JSON.stringify(repOwnBlink) !== JSON.stringify({ a: 0, k: 100 })) {
+			for (const L of json.layers) {
+				if (L.ty === 0 && L.refId === rep.a.id && (!L.ks || !L.ks.o || (L.ks.o.a === 0 && (L.ks.o.k === 100 || (Array.isArray(L.ks.o.k) && L.ks.o.k[0] === 100))))) {
+					L.ks = L.ks || {}
+					L.ks.o = JSON.parse(JSON.stringify(repOwnBlink))
+				}
+			}
+		}
+	}
+	return n
 }
 
 // 9. Static scalar values stored as one-element arrays.
@@ -1079,17 +1243,6 @@ export function binaryWindows(json, opts = {}) {
 				}
 			}
 			if (!spans) continue
-			// A paint-driven split deep-copies the WHOLE layer per window. When the blinking
-			// paint is a minor part of the layer (a big sibling fill curve — the common
-			// Cavalry grid-export case: 1.5KB blink beside an 8.5KB colour curve), the
-			// clones cost far more than the dead windows save. Only split when the blink
-			// curve dominates the layer's size. (All-size-0 JSON like test fixtures with
-			// tiny static curves still splits: the guard trips only on real size gaps.)
-			if (paintPath) {
-				const blink = JSON.stringify(paintPath.reduce((node, idx) => node[idx], L).o).length
-				const whole = JSON.stringify(L).length
-				if (whole > 600 && blink * 3 < whole) continue
-			}
 			// guards: the layer's transform must be static and nothing may offset its timing
 			const ks = L.ks || {}
 			const staticish = [ks.p, ks.s, ks.r, ks.a].every((q) => !q || !isAnimated(q))
@@ -1105,6 +1258,27 @@ export function binaryWindows(json, opts = {}) {
 			const total = hi - lo
 			// splitting pays when the off-time exceeds a key's cost and there aren't too many
 			if (!on.length || totalOn >= total * 0.9 || on.length > 64) continue
+			// A paint-driven split deep-copies the WHOLE layer per window. When the blinking
+			// paint is a minor part of the layer (a big sibling fill curve — the common
+			// Cavalry grid-export case: 1.5KB blink beside an 8.5KB colour curve), the
+			// clones cost far more than the dead windows save. Only split when the blink
+			// curve dominates the layer's size. (All-size-0 JSON like test fixtures with
+			// tiny static curves still splits: the guard trips only on real size gaps.)
+			if (paintPath) {
+				const blink = JSON.stringify(paintPath.reduce((node, idx) => node[idx], L).o).length
+				const whole = JSON.stringify(L).length
+				if (whole > 600 && blink * 3 < whole) continue
+			} else {
+				// A layer-opacity-driven split also deep-copies the whole layer per window;
+				// it only pays when the windows are few relative to the blink curve. Estimate
+				// the clone overhead (each clone re-carries everything except the blink) and
+				// skip when the clones cost more than the dropped curve — but only for real
+				// layers, not test-scale fixtures (same 600B floor as the paint guard).
+				const blink = JSON.stringify(o).length
+				const whole = JSON.stringify(L).length
+				const per = on.length * (whole - blink)
+				if (whole > 600 && per >= blink) continue
+			}
 			const clones = on.map(([a, b]) => {
 				const c = JSON.parse(JSON.stringify(L))
 				delete c.nm
@@ -2262,6 +2436,7 @@ export const PASSES = [
 	{ id: 'healBrokenRefs', label: 'Heal broken refs and bare transforms', group: 'lossless', on: true, run: healBrokenRefs },
 	{ id: 'removeHidden', label: 'Remove hidden layers and shapes', group: 'lossless', on: true, run: removeHidden },
 	{ id: 'removeDeadLayers', label: 'Remove layers that are never visible', group: 'lossless', on: true, run: removeDeadLayers },
+	{ id: 'stripZeroOpacity', label: 'Remove shapes that are 0% opacity at every frame', group: 'lossless', on: true, run: stripZeroOpacity },
 	{ id: 'foldStaticParents', label: 'Fold still group layers into their children', group: 'lossless', on: true, run: foldStaticParents },
 	{ id: 'removeIdentityNulls', label: 'Remove do-nothing null layers', group: 'lossless', on: true, run: removeIdentityNulls },
 	{ id: 'removeUnusedAssets', label: 'Remove unused assets', group: 'lossless', on: true, run: removeUnusedAssets },
@@ -2280,6 +2455,7 @@ export const PASSES = [
 	{ id: 'flattenShapeGroups', label: 'Flatten nested shape groups', group: 'lossless', on: true, run: flattenShapeGroups },
 	{ id: 'mergeShapeGroups', label: 'Share fills and strokes between shapes', group: 'lossless', on: true, run: mergeShapeGroups },
 	{ id: 'shareSameShape', label: 'Share identical shape geometry as precomp', group: 'lossless', on: true, run: shareSameShape },
+	{ id: 'decomposeSharedPaints', label: 'Share colour curves across blink phases', group: 'lossless', on: true, run: decomposeSharedPaints },
 	{ id: 'collapseStatic', label: 'Make unchanging animated properties static', group: 'lossless', on: true, run: collapseStatic },
 	{ id: 'removeRedundantKeys', label: 'Remove keys that change nothing', group: 'lossless', on: true, run: removeRedundantKeys },
 	{ id: 'trimKeyframeFields', label: 'Drop unused keyframe fields', group: 'lossless', on: true, run: trimKeyframeFields },
