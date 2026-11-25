@@ -5,8 +5,9 @@
 	"type": "module",
 	"private": true,
 	"scripts": {
-		"dev": "cross-env NODE_ENV=development npx bundler",
-		"release": "cross-env NODE_ENV=production npx bundler && cp build/*.jsc ../",
+		"build:info": "node build.cjs",
+		"dev": "npm run build:info && cross-env NODE_ENV=development npx bundler",
+		"release": "npm run build:info && cross-env NODE_ENV=production npx bundler && cp build/*.jsc ../",
 		"test": "node --test test/*.test.mjs"
 	},
 	"devDependencies": {

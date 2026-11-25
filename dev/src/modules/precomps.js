@@ -1167,7 +1167,10 @@ export function inheritOpacity(layers, from, to) {
 function isGuide(id) {
 	for (let q = id; q; q = api.getParent(q)) {
 		try {
-			if (api.get(q, 'guideLayer')) return true
+			// hasAttribute instead of get: reading guideLayer on node types that lack it
+			// (falloff, value, subMesh in current Cavalry) makes api.get log an
+			// "[E] Attribute not found" line per node — console noise on every export.
+			if (api.hasAttribute(q, 'guideLayer') && api.get(q, 'guideLayer')) return true
 		} catch (e) {}
 	}
 	return false

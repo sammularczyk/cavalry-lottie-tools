@@ -297,6 +297,42 @@ function referencedIndices(layers) {
 	return keep
 }
 
+// 0. Heal structurally broken files: precomp layers whose refId resolves to no asset, and
+// transforms written as bare p/s/r/o keys beside an empty ks (no player reads those — the
+// layer would render at the origin with default transform). Known Cavalry pipeline damage
+// (see docs/cavalry-lottie-exporter-issues.md): exports that lost their duplicator restructure
+// keep dangling shape_N refs whose only readable transform sits in bare top-level keys.
+export function healBrokenRefs(json) {
+	let n = 0
+	const assets = Array.isArray(json.assets) ? json.assets : []
+	const ids = new Set(assets.map((a) => a.id))
+	for (const layers of layerLists(json)) {
+		for (let i = layers.length - 1; i >= 0; i--) {
+			const L = layers[i]
+			// Dangling precomp ref: a layer referencing an asset that does not exist can't draw.
+			if (L.ty === 0 && L.refId != null && !ids.has(L.refId)) {
+				layers.splice(i, 1)
+				n++
+				continue
+			}
+			// Bare top-level p/s/r/o/a beside an empty ks: move them into ks.
+			if (L.ty !== 0 || L.refId == null) continue
+			const ks = L.ks || {}
+			const bare = ['p', 's', 'r', 'o', 'a'].filter((k) => L[k] != null && !ks[k])
+			if (!bare.length) continue
+			for (const k of bare) ks[k] = L[k]
+			delete L.p
+			delete L.s
+			delete L.r
+			delete L.o
+			delete L.a
+			L.ks = ks
+			n++
+		}
+	}
+	return n
+}
+
 // 5. Hidden layers and shape items.
 export function removeHidden(json) {
 	let n = 0
@@ -968,6 +1004,125 @@ export function holdJumps(json, opts = {}) {
 			n++
 		}
 	})
+	return n
+}
+
+// Binary on/off opacity → windows instead of keys. Cavalry rigs a per-copy blink through
+// random/falloff behaviours; baked to Lottie that's a per-frame hold-keyed 0/100 curve on a
+// layer's or paint's opacity. Two reductions:
+// 1. LAYER ks.o: values only 0/rest → split the layer into one copy per on-window with
+//    plain ip/op (no opacity keys at all). Needs a static transform and no parent/matte so
+//    the windows' timing stays absolute.
+// 2. PAINT fl.o/st.o: hold-keyed 0/rest steps collapse to one key per transition
+//    (removeRedundantKeys already handles runs; here we drop fully-off stretches by not
+//    writing keys inside them — hold semantics keep the value until the next key).
+// A blink value is "rest" when within 1% of the property's non-zero level (usually 100).
+export function binaryWindows(json, opts = {}) {
+	let n = 0
+	const level = (v) => (Math.abs(v - 100) < 1 ? 100 : Math.abs(v) < 1 ? 0 : null)
+	const windows = (p) => {
+		// The 0/rest runs as [startT, endT) spans; null when the curve isn't a binary step.
+		if (!p || !isAnimated(p) || p.k.length < 2 || p.x) return null
+		const k = p.k
+		const spans = []
+		let cur = null
+		for (const kf of k) {
+			const v = level(Array.isArray(kf.s) ? kf.s[0] : kf.s)
+			if (v == null) return null
+			if (kf.h !== 1) {
+				// eased/linear transitions between binary levels: only safe if the segment
+				// is a same-value run's padding (value equal on both ends)
+				const nv = kf.s
+				const nx = k[k.indexOf(kf) + 1]
+				if (nx && level(Array.isArray(nx.s) ? nx.s[0] : nx.s) !== v) return null
+			}
+			if (v === 100) {
+				if (!cur) cur = [kf.t, kf.t]
+				cur[1] = Infinity // held until the next key says otherwise
+			} else if (cur) {
+				cur[1] = kf.t
+				spans.push(cur)
+				cur = null
+			}
+		}
+		if (cur) spans.push(cur)
+		return spans.length ? spans : null
+	}
+
+	for (const layers of layerLists(json)) {
+		// top-level layers also die outside the comp's own visible range
+		const inRoot = layers === json.layers
+		const rootFrom = inRoot && json.ip != null ? json.ip : -Infinity
+		const rootTo = inRoot && json.op != null ? json.op : Infinity
+		for (let i = layers.length - 1; i >= 0; i--) {
+			const L = layers[i]
+			// the blink sits on the layer opacity, or — the common Cavalry case — on the
+			// opacity of the layer's ONLY binary-animated paint (fill/stroke) while the
+			// layer opacity itself is static: then the paint's windows drive the split and
+			// every clone gets a static full-on paint (and static full-on layer opacity)
+			const o = L.ks && L.ks.o
+			let spans = windows(o)
+			let paintPath = null
+			if (!spans && (!o || !isAnimated(o))) {
+				const paths = []
+				const walk = (items, path) => {
+					for (let idx = 0; idx < (items || []).length; idx++) {
+						const it = items[idx]
+						if (PAINT_ITEMS.includes(it.ty) && windows(it.o)) paths.push([...path, idx])
+						if (it.ty === 'gr') walk(it.it, [...path, idx, 'it'])
+					}
+				}
+				walk(L.shapes, ['shapes'])
+				if (paths.length === 1) {
+					paintPath = paths[0]
+					spans = windows(paintPath.reduce((node, idx) => node[idx], L).o)
+				}
+			}
+			if (!spans) continue
+			// A paint-driven split deep-copies the WHOLE layer per window. When the blinking
+			// paint is a minor part of the layer (a big sibling fill curve — the common
+			// Cavalry grid-export case: 1.5KB blink beside an 8.5KB colour curve), the
+			// clones cost far more than the dead windows save. Only split when the blink
+			// curve dominates the layer's size. (All-size-0 JSON like test fixtures with
+			// tiny static curves still splits: the guard trips only on real size gaps.)
+			if (paintPath) {
+				const blink = JSON.stringify(paintPath.reduce((node, idx) => node[idx], L).o).length
+				const whole = JSON.stringify(L).length
+				if (whole > 600 && blink * 3 < whole) continue
+			}
+			// guards: the layer's transform must be static and nothing may offset its timing
+			const ks = L.ks || {}
+			const staticish = [ks.p, ks.s, ks.r, ks.a].every((q) => !q || !isAnimated(q))
+			if (!staticish || L.parent != null || L.tt || L.tm || L.hasMask) continue
+			// clamp the windows to the layer's and comp's visible ranges FIRST, so the
+			// profitability check sees what the clones would actually cover
+			const lo = Math.max(L.ip != null ? L.ip : -Infinity, rootFrom)
+			const hi = Math.min(L.op != null ? L.op : Infinity, rootTo)
+			const on = spans
+				.map(([a, b]) => [Math.max(a, lo), Math.min(b == Infinity ? hi : b, hi)])
+				.filter(([a, b]) => b > a)
+			const totalOn = on.reduce((s, [a, b]) => s + (b - a), 0)
+			const total = hi - lo
+			// splitting pays when the off-time exceeds a key's cost and there aren't too many
+			if (!on.length || totalOn >= total * 0.9 || on.length > 64) continue
+			const clones = on.map(([a, b]) => {
+				const c = JSON.parse(JSON.stringify(L))
+				delete c.nm
+				c.ip = a
+				c.op = b
+				c.ks = Object.assign({}, c.ks, { o: { a: 0, k: 100 } })
+				if (paintPath) {
+					// the clone's sole blinking paint burns at full strength inside its window
+					const p = paintPath.slice(0, -1).reduce((node, idx) => node[idx], c)
+					p[paintPath[paintPath.length - 1]].o = { a: 0, k: 100 }
+				}
+				return c
+			}).filter((c) => c.op > c.ip)
+			if (!clones.length) continue
+			layers.splice(i, 1, ...clones)
+			n += clones.length
+		}
+	}
 	return n
 }
 
@@ -1697,12 +1852,414 @@ export function mergeShapeGroups(json) {
 	for (const layers of layerLists(json)) for (const L of layers) visit(L.shapes)
 	return n
 }
+// Share geometry across shape groups: when multiple groups within a shape layer hold
+// the same path vertices AND the same paints, keep one group in place and replace the
+// others with precomp reference layers positioned at each copy's own location.
+// Cavalry's duplicator export bakes copies as in-layer groups: the path carries absolute
+// positions and each group's tr repeats them, so a 13×29 grid costs 377× both. Sharing
+// one precomp per (geometry, paint) family collapses that to one copy + thin ref layers.
+// Draw order: ref layers are inserted at the shared layer level (appended below the
+// shape layer in JSON order), which keeps them under any opaque master content.
+export function shareSameShape(json, opts = {}) {
+	const pad = 2 * Math.max(json.w || 0, json.h || 0, 1000)
+	let n = 0
+	const assets = json.assets || []
+	let nextAssetId = Math.max(0, ...assets.map((a) => Number(String(a.id).replace(/\D/g, '')) || 0))
+	// Ref layers need an ind above every existing layer ind (Lottie top-of-stack);
+	// each new ref gets the next free one.
+	const maxInd = Math.max(0, ...layerLists(json).flat().map((L) => L.ind || 0))
+	let refInd = maxInd
+	const nextLayerInd = () => ++refInd
+	const ids = new Set(assets.map((a) => a.id))
+	const newAssetId = () => {
+		let id
+		do id = 'shape_' + ++nextAssetId
+		while (ids.has(id))
+		ids.add(id)
+		return id
+	}
+
+	// Fingerprint a group for (geometry, paint) match, normalising out translation.
+	// Cavalry's baked mesh deformation stores vertices at absolute positions on screen.
+	// Two identical squares at different positions have different absolute coords but
+	// identical relative geometry: normalise v by centroid so only shape matters.
+	// i/o are bezier TANGENT DELTAS relative to their vertex — they must stay raw;
+	// centroid-subtracting them made every translated copy a false distinct family.
+	// The paints are fingerprinted too: two copies that draw the same rect with
+	// different animated fills cannot share a precomp.
+	const centroid = (pts) => [
+		pts.reduce((s, p) => s + p[0], 0) / pts.length,
+		pts.reduce((s, p) => s + p[1], 0) / pts.length,
+	]
+	const normalise = (pts, c) => pts.map((p) => [p[0] - c[0], p[1] - c[1]])
+	const roundPt = (p) => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10]
+	const fingerprint = (shapeNode, paintNodes) => {
+		if (!shapeNode || !shapeNode.ks || shapeNode.ks.a === 1) return null
+		const k = shapeNode.ks.k
+		if (!k || !k.v || !k.v.length) return null
+		const c = centroid(k.v)
+		// Normalise out translation and round to 0.1px tolerance — handles simplifyPaths
+		// making paths "nearly identical" instead of truly identical.
+		const v = normalise(k.v, c).map(roundPt)
+		const i = k.i ? k.i.map(roundPt) : []
+		const o = k.o ? k.o.map(roundPt) : []
+		return JSON.stringify({ v, i, o, c: k.c, fill: paintNodes.map((p) => JSON.stringify(p)) })
+	}
+
+	// Walk all groups in a layer's shapes tree. `acc` is the accumulated STATIC transform of
+	// every ancestor group ({x,y,s,r} in pre-multiplied Lottie form) — a copy nested inside
+	// offset parents must be shared with that offset carried into the ref layer's transform,
+	// because the master copy keeps drawing under the ancestor chain while the ref layer
+	// does not. Animated ancestor transforms make the chain un-shareable: copies under them
+	// get a null acc and are excluded from sharing.
+	const staticTr = (g) => {
+		const tr = g.it.find((x) => x.ty === 'tr')
+		if (!tr) return { x: 0, y: 0, s: [100, 100], r: 0 }
+		// Keyed-but-constant props count as static: every key carries the same value, so
+		// the effective transform never changes (recoverRigidMotion keys rigid copies).
+		const constArr = (p) => {
+			if (!p) return null
+			if (!p.a && Array.isArray(p.k)) return p.k
+			if (p.a && Array.isArray(p.k) && p.k.length && p.k.every((kf) => Array.isArray(kf.s) && kf.s.length === p.k[0].s.length && kf.s.every((v, i) => v === p.k[0].s[i]))) return p.k[0].s
+			return null
+		}
+		const constNum = (p) => {
+			if (!p) return null
+			if (!p.a) {
+				if (typeof p.k === 'number') return p.k
+				if (Array.isArray(p.k) && p.k.length === 1 && typeof p.k[0] === 'number') return p.k[0]
+				return null
+			}
+			if (Array.isArray(p.k) && p.k.length && p.k.every((kf) => typeof kf.s === 'number' && kf.s === p.k[0].s)) return p.k[0].s
+			return null
+		}
+		const pos = constArr(tr.p)
+		const anc = constArr(tr.a)
+		const s = constArr(tr.s)
+		const r = constNum(tr.r)
+		if ((tr.p && !pos) || (tr.a && !anc) || (tr.s && !s) || (tr.r && r == null)) return null
+		return { x: pos ? pos[0] : 0, y: pos ? pos[1] : 0, ax: anc ? anc[0] : 0, ay: anc ? anc[1] : 0, s: s || [100, 100], r: r || 0 }
+	}
+	const composeAcc = (a, t) => {
+		// child transform then ancestor: Lottie group applies ancestor first, so
+		// point -> child -> ancestor. Position: acc + R(acc_r) * S(acc_s) * (childPos - childAnc) ... keep to the
+		// common Cavalry case: translation-only chains, scaled/rotated ancestors reject sharing.
+		if (t.s[0] !== 100 || t.s[1] !== 100 || t.r !== 0) return null
+		if (!a) return null
+		return { x: a.x + t.x, y: a.y + t.y, s: a.s, r: a.r }
+	}
+	const collectGroups = (items, out, acc) => {
+		for (const g of items) {
+			if (g && g.ty === 'gr' && Array.isArray(g.it)) {
+				const t = staticTr(g)
+				const child = t ? composeAcc(acc, t) : null
+				// The entry's acc EXCLUDES the group's own static transform: anchorZero
+				// captures that as the copy's own position, and refTransform adds acc
+				// on top. Including it here would double-count.
+				if (child) out.push({ g, acc })
+				// The acc passed DOWN includes this group's transform.
+				collectGroups(g.it, out, child)
+			}
+		}
+	}
+
+	// Identity-anchor normalisation (Cavalry bakes position twice: path coords AND
+	// tr.p/tr.a at the same cell position). p===a anchors contribute nothing — zero
+	// both so the ref transform is a pure position. Returns the baked position, which
+	// anchorZero also REMOVES from the group's tr, so callers must put it back as the
+	// ref layer's p (refTransform's capturedPos argument).
+	const anchorZero = (g) => {
+		const tr = g.it.find((x) => x.ty === 'tr')
+		if (!tr) return null
+		const pos = tr.p && !tr.p.a && Array.isArray(tr.p.k) ? tr.p.k.slice(0, 2) : null
+		const anc = tr.a && !tr.a.a && Array.isArray(tr.a.k) ? tr.a.k.slice(0, 2) : null
+		if (pos && anc && pos[0] === anc[0] && pos[1] === anc[1]) {
+			tr.p = { a: 0, k: [0, 0] }
+			tr.a = { a: 0, k: [0, 0] }
+		}
+		return pos
+	}
+
+	// Find the parent array containing `target`.
+	const findParent = (root, target) => {
+		for (let i = 0; i < root.length; i++) {
+			if (root[i] === target) return root
+			if (root[i] && root[i].it) {
+				const r = findParent(root[i].it, target)
+				if (r) return r
+			}
+		}
+		return null
+	}
+
+	// Build a ref layer from a copy's transform. The precomp holds the copy centred on
+	// its own centroid with the anchor there, so the ref's p must be the copy's baked
+	// position — that was captured by anchorZero BEFORE zeroing (capturedPos), because
+	// the group's tr.p has been zeroed by then. s/r/o/sk come from the copy's tr.
+	const refTransform = (g, capturedPos, acc) => {
+		const tr = g.it.find((x) => x.ty === 'tr') || {}
+		const prop = (k) => (tr[k] && tr[k].k != null ? JSON.parse(JSON.stringify(tr[k])) : null)
+		// Ref position = the copy's own baked position + every ancestor group's static
+		// translation (the master draws under that chain; the ref layer replaces the
+		// whole subtree, so the chain must be folded in). Scale/rotation ancestors are
+		// rejected at collect time (acc null → copy excluded from sharing).
+		const ax = acc ? acc.x : 0
+		const ay = acc ? acc.y : 0
+		// own position: capturedPos (pre-zeroing tr.p), else the group's tr.p — but that
+		// can be keyed-with-constant (keyframe objects); take the constant value then.
+		let own = capturedPos
+		if (!own) {
+			const pp = tr.p
+			if (pp && Array.isArray(pp.k)) {
+				if (!pp.a) own = pp.k.slice(0, 2)
+				else if (pp.k.length && Array.isArray(pp.k[0].s) && pp.k.every((kf) => Array.isArray(kf.s) && kf.s[0] === pp.k[0].s[0] && kf.s[1] === pp.k[0].s[1])) own = pp.k[0].s.slice(0, 2)
+			}
+		}
+		own = own || [0, 0]
+		// The precomp's inner layer sits at (pad,pad) inside a 2*pad × 2*pad comp, so the
+		// ref must compensate: content lands at refP + (pad,pad) − anchor. Anchor is
+		// identity here, so subtract pad to put the content at the copy's own position.
+		const p = { a: 0, k: [own[0] + ax - pad, own[1] + ay - pad, 0] }
+		return {
+			p,
+			s: prop('s') || { a: 0, k: [100, 100, 100] },
+			r: prop('r') || { a: 0, k: 0 },
+			o: prop('o') || { a: 0, k: 100 },
+			...(tr.sk ? { sk: prop('sk') } : {}),
+			...(tr.sa ? { sa: prop('sa') } : {}),
+		}
+	}
+
+	// Relaxed signature for matching a group against EXISTING precomp assets the
+	// exporter already wrote. The full-paint fingerprint above misses them: Cavalry's
+	// asset twins differ from the main-layer groups by re-centred path coords, a
+	// trimmed group transform, and blink opacity keys whose easing fields were
+	// rewritten — while geometry, the colour curve, and the blink's key times+values
+	// are identical. Match on exactly those: normalised geometry + full colour-curve
+	// JSON + the blink's (t, s) pattern. Hold-only blinks keep output exact (a hold
+	// key carries no easing to differ); anything else falls back to new-asset sharing.
+	const existingSig = (shapeNode, paintNodes) => {
+		if (paintNodes.length !== 1) return null
+		const p = paintNodes[0]
+		if (p.ty !== 'fl') return null
+		if (!p.c) return null
+		let oSig
+		if (!p.o) oSig = 'none'
+		else if (p.o.a === 0) oSig = 's:' + JSON.stringify(p.o.k)
+		else {
+			const k = p.o.k
+			// Every key must be a hold EXCEPT possibly the last (a final key's
+			// interpolator never runs, and Cavalry's writer omits h there).
+			const hold = k.length && k.slice(0, -1).every((x) => x.h === 1)
+			if (!hold) return null
+			oSig = 'k:' + JSON.stringify(k.map((x) => [x.t, Array.isArray(x.s) ? x.s[0] : x.s]))
+		}
+		const geo = fingerprint(shapeNode, [])
+		return geo ? geo + '|' + JSON.stringify(p.c) + '|' + oSig : null
+	}
+
+	// Index reusable assets: single inner shape layer, single fill, static inner
+	// transform, inner layer spanning at least what a ref needs (checked at use).
+	const existingIndex = new Map()
+	for (const a of assets) {
+		if (!a.layers || a.layers.length !== 1) continue
+		const il = a.layers[0]
+		if (il.ty !== 4 || !il.shapes || il.shapes.length !== 1) continue
+		const root = il.shapes[0]
+		if (root.ty !== 'gr' || !Array.isArray(root.it)) continue
+		const sh = root.it.find((x) => x.ty === 'sh')
+		if (!sh) continue
+		const paints = root.it.filter((x) => PAINT_ITEMS.includes(x.ty))
+		if (paints.length !== 1) continue
+		// content position inside the asset: inner layer p minus anchor; only static,
+		// anchor-free inner layers are reusable (anything else shifts unpredictably)
+		if (!il.ks || !il.ks.p || il.ks.p.a !== 0 || !Array.isArray(il.ks.p.k)) continue
+		if (il.ks.a && (il.ks.a.a !== 0 || il.ks.a.k[0] !== 0 || il.ks.a.k[1] !== 0)) continue
+		const sig = existingSig(sh, paints)
+		if (!sig || existingIndex.has(sig)) continue
+		existingIndex.set(sig, { refId: a.id, w: a.w, h: a.h, centre: [il.ks.p.k[0], il.ks.p.k[1]], ip: il.ip, op: il.op })
+	}
+
+	// Asset inner layers must be skipped: demoting an asset's own inner group onto
+	// that same asset empties it (every ref to it then draws nothing).
+	const assetLayerSet = new Set()
+	for (const a of assets) for (const il of a.layers || []) assetLayerSet.add(il)
+
+	for (const layers of layerLists(json)) {
+		for (const layer of layers) {
+			if (layer.ty !== 4) continue
+			if (assetLayerSet.has(layer)) continue
+
+			// Collect all shape groups with their accumulated ancestor transform
+			const groups = []
+			collectGroups(layer.shapes, groups, { x: 0, y: 0, s: [100, 100], r: 0 })
+
+			// Group by (geometry, paint) fingerprint, recording each copy's baked position
+			const byFp = new Map()
+			// Groups matching an EXISTING asset (relaxed sig) demote independently of
+			// fingerprint families — even a single group is worth demoting when the
+			// asset already exists (the curves are already paid for in the asset).
+			const reuseJobs = []
+			for (const g of groups) {
+				const shapes = g.g.it.filter((x) => x.ty === 'sh')
+				if (!shapes.length) continue
+				const paints = g.g.it.filter((x) => PAINT_ITEMS.includes(x.ty))
+				const s = shapes[0]
+				// skip groups already inside a reused asset's own layer tree
+				const es = existingSig(s, paints)
+				if (es && existingIndex.has(es)) { reuseJobs.push({ g: g.g, pos: anchorZero(g.g), acc: g.acc, reuse: existingIndex.get(es) }); continue }
+				const fp = fingerprint(s, paints)
+				if (!fp) continue
+				if (!byFp.has(fp)) byFp.set(fp, [])
+				byFp.get(fp).push({ g: g.g, shape: s, pos: anchorZero(g.g), acc: g.acc })
+			}
+
+			// Demote groups onto their existing precomp asset. The asset's inner layer
+			// sits at `centre` inside a w×h comp, and the group draws at its centroid +
+			// ancestor translation inside the root group (root.p offsets everything):
+			// ref.p = root.p + cell + acc − centre.
+			{
+				const rootTr = layer.shapes[0] && layer.shapes[0].ty === 'gr'
+					? staticTr(layer.shapes[0])
+					: null
+				const rootP = rootTr ? { x: rootTr.x, y: rootTr.y } : null
+				if (rootP) {
+					for (const job of reuseJobs) {
+						const g = job.g
+						const parentItems = findParent(layer.shapes, g)
+						if (!parentItems) continue
+						const idx = parentItems.indexOf(g)
+						if (idx < 0) continue
+						// cell = the copy's position in root-local space: its centroid is
+						// baked in root coordinates already (Cavalry bakes absolute
+						// positions); acc adds nested ancestor offsets.
+						const shK = g.it.find((x) => x.ty === 'sh').ks.k
+						const cell = centroid(shK.v)
+						const r = job.reuse
+						const refLayer = {
+							ty: 0,
+							refId: r.refId,
+							w: r.w,
+							h: r.h,
+							ind: g.ind || nextLayerInd(),
+							ip: Math.max(layer.ip, r.ip),
+							op: Math.min(layer.op, r.op),
+							st: layer.st || 0,
+							sr: layer.sr || 1,
+							ks: {
+								// job.acc already INCLUDES the root group's transform
+								// (collectGroups folds the ancestor chain down from the
+								// layer), so the absolute position is cell + acc; adding
+								// rootP as well double-counts the root offset.
+								p: { a: 0, k: [cell[0] + job.acc.x - r.centre[0], cell[1] + job.acc.y - r.centre[1], 0] },
+								s: { a: 0, k: [100, 100, 100] },
+								r: { a: 0, k: 0 },
+								o: { a: 0, k: 100 },
+							},
+						}
+						parentItems.splice(idx, 1)
+						json.layers = [...json.layers, refLayer]
+						n++
+					}
+				}
+			}
+
+			// For each fingerprint with 2+ copies, create a precomp
+			for (const [fp, members] of byFp) {
+				if (members.length < 2) continue
+
+				const assetId = newAssetId()
+				const master = members[0]
+				const masterGroup = master.g
+
+				// Extract paints and transform from master group
+				const paints = masterGroup.it.filter((x) => PAINT_ITEMS.includes(x.ty))
+				const tr = masterGroup.it.find((x) => x.ty === 'tr')
+
+				// Build precomp asset: one copy of the shared (geometry, paint), with the
+				// path re-centred on the copy's own centroid and the anchor at that new
+				// origin (so the group transform is identity): every outer ref layer
+				// then positions the content with its p alone.
+				const innerShape = JSON.parse(JSON.stringify(master.shape))
+				const mk = innerShape.ks.k
+				const c = centroid(mk.v)
+				mk.v = mk.v.map((p) => [p[0] - c[0], p[1] - c[1]])
+				// tangents are deltas — they survive the re-centre unchanged
+				const innerItems = [innerShape, ...JSON.parse(JSON.stringify(paints))]
+				if (tr)
+					innerItems.push({
+						ty: 'tr',
+						p: { a: 0, k: [0, 0, 0] },
+						a: { a: 0, k: [0, 0, 0] },
+						s: { a: 0, k: [100, 100, 100] },
+						r: { a: 0, k: 0 },
+						o: { a: 0, k: 100 },
+					})
+
+				const innerLayer = {
+					ty: 4,
+					ind: 1,
+					ip: layer.ip,
+					op: layer.op,
+					st: layer.st || 0,
+					sr: layer.sr || 1,
+					ks: { p: { a: 0, k: [pad, pad, 0] } },
+					shapes: [{ ty: 'gr', it: innerItems, bm: 1 }],
+				}
+
+				json.assets = [...(json.assets || []), { id: assetId, nm: 'shape', fr: json.fr || 30, w: 2 * pad, h: 2 * pad, ip: layer.ip, op: layer.op, layers: [innerLayer] }]
+
+				// Replace EVERY copy group (master included) with a precomp reference
+				// layer at its own position. Keeping the master in the shape layer
+				// duplicates its full paint curves (the master can be the only copy
+				// carrying a rare (fill, opacity) combination — a 10KB group drawn
+				// twice). Refs appended after the shape layer draw on top of what
+				// remains of it; for opaque grid copies that is identical output.
+				// Refs draw in layer order: later layers on top, so appending in
+				// members' original order preserves z within the family.
+				members.forEach((member) => {
+					const g = member.g
+					const parentItems = findParent(layer.shapes, g)
+					if (!parentItems) return
+
+					const idx = parentItems.indexOf(g)
+					if (idx < 0) return
+
+					// Remove the duplicate group
+					parentItems.splice(idx, 1)
+
+					// Build precomp ref layer with this copy's transform
+					const tf = refTransform(g, member.pos, member.acc)
+					const refLayer = {
+						ty: 0,
+						refId: assetId,
+						w: 2 * pad,
+						h: 2 * pad,
+						ind: g.ind || nextLayerInd(),
+						ip: layer.ip,
+						op: layer.op,
+						st: layer.st || 0,
+						sr: layer.sr || 1,
+						ks: tf,
+					}
+
+					json.layers = [...json.layers, refLayer]
+				})
+
+				n += members.length
+			}
+		}
+	}
+	return n
+}
+
 
 // ---------- catalogue + runner ----------
 
 // group: lossless | lossy | assets | output. Order here is the order passes run in: lossy
 // passes come before collapseStatic and friends so those can clean up after them.
 export const PASSES = [
+	{ id: 'healBrokenRefs', label: 'Heal broken refs and bare transforms', group: 'lossless', on: true, run: healBrokenRefs },
 	{ id: 'removeHidden', label: 'Remove hidden layers and shapes', group: 'lossless', on: true, run: removeHidden },
 	{ id: 'removeDeadLayers', label: 'Remove layers that are never visible', group: 'lossless', on: true, run: removeDeadLayers },
 	{ id: 'foldStaticParents', label: 'Fold still group layers into their children', group: 'lossless', on: true, run: foldStaticParents },
@@ -1713,6 +2270,7 @@ export const PASSES = [
 	{ id: 'recoverRigidMotion', label: 'Turn baked moving shapes back into transforms', group: 'lossy', on: true, run: recoverRigidMotion },
 	{ id: 'equalisePathPoints', label: 'Fix paths whose point count changes', group: 'lossless', on: true, run: equalisePathPoints },
 	{ id: 'holdJumps', label: 'Hold one-frame jumps', group: 'lossless', on: true, run: holdJumps, options: { all: false } },
+	{ id: 'binaryWindows', label: 'Turn blinking opacity into visible windows', group: 'lossless', on: true, run: binaryWindows },
 	{ id: 'simplifyKeys', label: 'Fit keyframes with curves', group: 'lossy', on: true, run: simplifyKeys, options: { eased: false } },
 	{ id: 'simplifyPaths', label: 'Simplify paths', group: 'lossy', on: true, run: simplifyPaths },
 	{ id: 'roundPrecision', label: 'Round values (decimals per kind)', group: 'lossy', on: true, run: roundPrecision },
@@ -1721,6 +2279,7 @@ export const PASSES = [
 	{ id: 'mergeShapeLayers', label: 'Merge neighbouring shape layers', group: 'lossless', on: true, run: mergeShapeLayers },
 	{ id: 'flattenShapeGroups', label: 'Flatten nested shape groups', group: 'lossless', on: true, run: flattenShapeGroups },
 	{ id: 'mergeShapeGroups', label: 'Share fills and strokes between shapes', group: 'lossless', on: true, run: mergeShapeGroups },
+	{ id: 'shareSameShape', label: 'Share identical shape geometry as precomp', group: 'lossless', on: true, run: shareSameShape },
 	{ id: 'collapseStatic', label: 'Make unchanging animated properties static', group: 'lossless', on: true, run: collapseStatic },
 	{ id: 'removeRedundantKeys', label: 'Remove keys that change nothing', group: 'lossless', on: true, run: removeRedundantKeys },
 	{ id: 'trimKeyframeFields', label: 'Drop unused keyframe fields', group: 'lossless', on: true, run: trimKeyframeFields },

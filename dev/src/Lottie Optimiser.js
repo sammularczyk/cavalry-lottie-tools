@@ -8,9 +8,11 @@ import { checkLottie, describePlayers } from './modules/players.js'
 import { theme, label, section, button, row, toggleRow, list, tabStrip, icon } from './modules/ui/kit.js'
 import { checkForUpdate } from './modules/updateChecker.js'
 import { exportComp, BAKE_MODES } from './modules/cavalryExport.js'
+import { restructureDuplicators } from './modules/duplicatorRestructure.js'
 import { packImages } from './modules/images.js'
 import { gzipSize, zip, utf8, base64 } from './modules/zip.js'
 import { exportWithPrecomps } from './modules/precomps.js'
+import { BUILD_ID } from './modules/buildInfo.js'
 
 var GITHUB_REPO = 'sammularczyk/cavalry-lottie-tools'
 var SCRIPT_NAME = 'Lottie Optimiser'
@@ -21,7 +23,7 @@ var PREF_KEY = 'lottieTools_exporter' // old key kept so saved settings carry ov
 
 // Options that can change how the animation looks or which apps can use it. Everything
 // else is lossless and always on (hidden), so saved settings can't switch it off.
-var ADVANCED = ['precomps', 'gradientStrokeFills', 'recoverRigidMotion', 'simplifyKeys', 'simplifyPaths', 'roundPrecision', 'holdAll', 'refitEased', 'stripNames', 'embedImages', 'jpegImages', 'pretty']
+var ADVANCED = ['precomps', 'gradientStrokeFills', 'recoverRigidMotion', 'simplifyKeys', 'simplifyPaths', 'roundPrecision', 'holdAll', 'refitEased', 'stripNames', 'embedImages', 'jpegImages', 'pretty', 'duplicators']
 var ALWAYS = { exponent: true }
 PASSES.forEach(function (p) {
 	if (ADVANCED.indexOf(p.id) < 0) ALWAYS[p.id] = p.on
@@ -58,7 +60,7 @@ function currentPreset() {
 }
 
 function defaults() {
-	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, refitEased: false, precomps: true, gradientStrokeFills: true, bakeMode: 0, page: 0, accuracy: 1, display: 0, format: 0, embedImages: true, jpegImages: false, advancedOpen: false }
+	var s = { exponent: true, pretty: false, stripNames: false, holdAll: false, refitEased: false, precomps: true, gradientStrokeFills: true, bakeMode: 0, page: 0, accuracy: 1, display: 0, format: 0, embedImages: true, jpegImages: false, advancedOpen: false, duplicators: true }
 	PASSES.forEach(function (p) {
 		s[p.id] = p.on
 	})
@@ -256,7 +258,7 @@ function exportSelected() {
 }
 
 function exportRange() {
-	var opts = { bakeMode: settings.bakeMode > 0 ? settings.bakeMode - 1 : null, outlineGradientStrokes: settings.gradientStrokeFills }
+	var opts = { bakeMode: settings.bakeMode > 0 ? settings.bakeMode - 1 : null, outlineGradientStrokes: settings.gradientStrokeFills, duplicators: settings.duplicators }
 	if (!settings.precomps) {
 		var e = exportComp(selectedComp(), opts)
 		return { json: e.json, dirs: [e.dir], note: '' }
@@ -283,6 +285,7 @@ var ROW_TEXT = {
 	embedImages: ['Embed images in the file', 'Puts images inside the JSON, so it’s one file to hand over. Images grow by a third when embedded. Off: images are saved in an images folder next to the file. A .lottie always holds its images.', 'One file, nothing to lose'],
 	jpegImages: ['Save opaque images as JPEG', 'Images with no transparency are saved as JPEG (85% quality) when that’s smaller. Slight JPEG softening. macOS only; Cavalry asks you to trust the script the first time.', 'Smaller, slightly softer'],
 	pretty: ['Pretty print', 'Spaced out so people can read it. Much larger; use for debugging only.', 'Readable, much larger'],
+	duplicators: ['Restructure duplicators as precomps', 'Replaces duplicated shape groups with a shared precomp + per-copy offset transforms. Cuts 3.8 MB → 1.6 MB on Composition 4c. May not play in all Lottie players.', '59% smaller on large grids'],
 }
 PASSES.forEach(function (p) {
 	if (!ROW_TEXT[p.id] && TIPS[p.id]) ROW_TEXT[p.id] = [p.label, TIPS[p.id][0], TIPS[p.id][1]]
@@ -544,7 +547,20 @@ function optimiseAndWrite(json, out, extra, dirs) {
 function runOptimiseFile() {
 	var path = api.presentOpenFile(api.getProjectPath() || api.getDesktopFolder(), 'Optimise Lottie', 'Lottie JSON (*.json)')
 	if (!path) return
-	optimiseAndWrite(JSON.parse(api.readFromFile(path)), path.replace(/(\.min)?\.json$/i, '') + '.min.json', [], [api.getFolderFromPath(path)])
+	var lj = JSON.parse(api.readFromFile(path))
+
+	// Run duplicator restructure if enabled in settings
+	if (settings.duplicators) {
+		try {
+			console.log(TAG + 'Running duplicator restructure...')
+			restructureDuplicators(lj, { duplicators: true })
+			console.log(TAG + 'Restructure done. assets=' + (lj.assets ? lj.assets.length : 0) + ', layers=' + lj.layers.length)
+		} catch (e) {
+			console.warn(TAG + 'Restructure failed: ' + e.message)
+		}
+	}
+
+	optimiseAndWrite(lj, path.replace(/(\.min)?\.json$/i, '') + '.min.json', [], [api.getFolderFromPath(path)])
 }
 
 function runExport() {
@@ -584,6 +600,7 @@ root.setMargins(8, 8, 8, 8)
 root.setSpaceBetween(8)
 root.add(tabs.widget)
 root.add(pages) // a PageView inside a Container stops rendering, so it goes straight in
+root.add(label(PRODUCT_VERSION + ' (' + BUILD_ID + ')', 10, T.muted))
 root.addStretch()
 
 ui.setTitle(SCRIPT_NAME)

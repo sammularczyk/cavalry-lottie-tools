@@ -6,4 +6,5 @@ dist/
 *.log
 docs/
 dev/docs/
+dev/src/modules/buildInfo.js
 .preview

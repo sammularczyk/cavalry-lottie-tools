@@ -573,3 +573,201 @@ test('equalisePathPoints: keys get one point count; shapes unchanged; holds wher
 	assert.deepEqual(t.o[2], [0, 0]) // ...with a zero-length step to it
 	assert.deepEqual(t.o[3], [2, 0]) // and the closing segment keeps the last point's handle
 })
+
+// ---------- healBrokenRefs ----------
+
+test('healBrokenRefs: dangling precomp refs go; bare p/s/r/o fold into empty ks', () => {
+	const j = {
+		assets: [{ id: 'shape_2', layers: [] }],
+		layers: [
+			{ ty: 0, refId: 'shape_1', ind: 1, ip: 0, op: 10, ks: {}, p: { a: 0, k: [50, 60] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 } },
+			{ ty: 0, refId: 'shape_2', ind: 2, ip: 0, op: 10, ks: {}, p: { a: 0, k: [0, 0] }, s: { a: 0, k: [200, 200] }, r: { a: 0, k: 45 }, o: { a: 0, k: 50 } },
+			{ ty: 4, ind: 3, ip: 0, op: 10, ks: {}, shapes: [] },
+		],
+	}
+	assert.equal(P.healBrokenRefs(j), 2)
+	assert.equal(j.layers.length, 2) // dangling shape_1 gone
+	assert.deepEqual(j.layers[0].ks, { p: { a: 0, k: [0, 0] }, s: { a: 0, k: [200, 200] }, r: { a: 0, k: 45 }, o: { a: 0, k: 50 } })
+	assert.equal(j.layers[0].p, undefined) // bare keys moved, not copied
+})
+
+test('healBrokenRefs: proper ks untouched; assets layers walked too', () => {
+	const j = {
+		assets: [
+			{ id: 'a', layers: [{ ty: 0, refId: 'missing', ks: {}, p: [5, 5] }] },
+			{ id: 'b', layers: [] },
+		],
+		layers: [{ ty: 0, refId: 'b', ind: 1, ip: 0, op: 10, ks: { p: { a: 0, k: [1, 2] } } }],
+	}
+	assert.equal(P.healBrokenRefs(j), 1)
+	assert.equal(j.assets[0].layers.length, 0) // dangling inside asset dropped
+	assert.deepEqual(j.layers[0].ks, { p: { a: 0, k: [1, 2] } }) // real ks left alone
+})
+
+// ---------- shareSameShape ----------
+
+const dupGroup = (x, y, fillKs) => {
+	const h = 10, r = 2, cx = x, cy = y
+	const path = { c: true,
+		v: [[cx - h + r, cy - h], [cx + h - r, cy - h], [cx + h, cy - h + r], [cx + h, cy + h - r], [cx + h - r, cy + h], [cx - h + r, cy + h], [cx - h, cy + h - r], [cx - h, cy - h + r]],
+		i: [[r, 0], [0, 0], [-r, 0], [0, 0], [0, r], [0, 0], [r, 0], [0, 0]],
+		o: [[-r, 0], [0, 0], [r, 0], [0, 0], [0, -r], [0, 0], [-r, 0], [0, 0]] }
+	return {
+		ty: 'gr',
+		it: [
+			{ ty: 'sh', ks: { a: 0, k: path } },
+			{ ty: 'fl', c: fillKs, o: { a: 0, k: 100 } },
+			{ ty: 'tr', p: { a: 0, k: [cx, cy] }, a: { a: 0, k: [cx, cy] }, s: { a: 0, k: [100, 100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 } },
+		],
+	}
+}
+
+test('shareSameShape: same geometry + same paint -> one precomp, refs at baked positions', () => {
+	const staticFill = { a: 0, k: [0, 0.157, 0.204, 1] }
+	const grid = [dupGroup(0, 0, staticFill), dupGroup(40, 0, staticFill), dupGroup(80, 0, staticFill), dupGroup(0, 40, staticFill)]
+	const j = { w: 100, h: 100, layers: [layer({ shapes: [{ ty: 'gr', it: [...grid, idTr()] }] })] }
+	assert.equal(P.shareSameShape(j), 4)
+	assert.equal(j.assets.length, 1)
+	const refs = j.layers.filter((L) => L.ty === 0)
+	assert.equal(refs.length, 4)
+	// each ref sits at its copy's cell position minus the precomp's (pad,pad) inner offset:
+	// the inner layer sits at (pad,pad) inside a 2*pad×2*pad comp, so ref p = cell − pad.
+	const pad = 2 * Math.max(100, 100, 1000)
+	assert.deepEqual(refs.map((r) => r.ks.p.k.slice(0, 2)).map((v) => [v[0] + pad, v[1] + pad]).sort(), [[0, 0], [0, 40], [40, 0], [80, 0]].sort())
+	// refs carry w/h so every player sizes the precomp
+	assert.ok(refs.every((r) => r.w === 2 * pad && r.h === 2 * pad))
+	assert.equal(j.assets[0].w, 2 * pad)
+	// the precomp content is centred with an identity group transform
+	const inner = j.assets[0].layers[0].shapes[0].it
+	const sh = inner.find((x) => x.ty === 'sh').ks.k
+	const cx = sh.v.reduce((s, p) => s + p[0], 0) / sh.v.length
+	const cy = sh.v.reduce((s, p) => s + p[1], 0) / sh.v.length
+	assert.ok(Math.abs(cx) < 0.05 && Math.abs(cy) < 0.05)
+	assert.deepEqual(inner.find((x) => x.ty === 'tr').p, { a: 0, k: [0, 0, 0] })
+	assert.deepEqual(inner.find((x) => x.ty === 'tr').a, { a: 0, k: [0, 0, 0] })
+	// every copy demotes — the shape layer is left with no groups
+	assert.equal(j.layers[0].shapes[0].it.filter((x) => x.ty === 'gr').length, 0)
+})
+
+test('shareSameShape: different paints never share (static vs animated fill)', () => {
+	const staticFill = { a: 0, k: [0, 0.157, 0.204, 1] }
+	const animFill = { a: 1, k: [kf(0, [1, 0, 0, 1], lin), kf(10, [0, 1, 0, 1])] }
+	const j = { w: 100, h: 100, assets: [], layers: [layer({ shapes: [{ ty: 'gr', it: [dupGroup(0, 0, staticFill), dupGroup(40, 0, animFill), idTr()] }] })] }
+	assert.equal(P.shareSameShape(j), 0)
+	assert.equal(j.assets.length, 0)
+})
+
+test('shareSameShape: two animated fill families -> two precomps', () => {
+	const fA = { a: 1, k: [kf(0, [1, 0, 0, 1], lin), kf(10, [0, 1, 0, 1])] }
+	const fB = { a: 1, k: [kf(0, [0, 0, 1, 1], lin), kf(10, [1, 1, 0, 1])] }
+	const j = { w: 100, h: 100, layers: [layer({ shapes: [{ ty: 'gr', it: [dupGroup(0, 0, fA), dupGroup(40, 0, fA), dupGroup(0, 40, fB), dupGroup(40, 40, fB), idTr()] }] })] }
+	assert.equal(P.shareSameShape(j), 4)
+	assert.equal(j.assets.length, 2)
+	const refs = j.layers.filter((L) => L.ty === 0)
+	assert.equal(refs.length, 4)
+	// each ref carries its own family's asset
+	const ids = new Set(refs.map((r) => r.refId))
+	assert.equal(ids.size, 2)
+})
+
+test('shareSameShape: tangents stay raw in the fingerprint (i/o not centroid-normalised)', () => {
+	// Same shape translated; rounded handles differ per-vertex, not per-copy.
+	const staticFill = { a: 0, k: [1, 0, 0, 1] }
+	const a = dupGroup(0, 0, staticFill)
+	const b = dupGroup(40, 0, staticFill)
+	// identical tangent deltas
+	const j = { w: 100, h: 100, layers: [layer({ shapes: [{ ty: 'gr', it: [a, b, idTr()] }] })] }
+	assert.equal(P.shareSameShape(j), 2)
+	// now make tangent deltas differ -> distinct families, no sharing
+	const c = dupGroup(0, 0, staticFill)
+	c.it[0].ks.k.i = c.it[0].ks.k.i.map((p) => [p[0] + 1, p[1]])
+	const d = dupGroup(40, 0, staticFill)
+	const j2 = { w: 100, h: 100, layers: [layer({ shapes: [{ ty: 'gr', it: [c, d, idTr()] }] })] }
+	assert.equal(P.shareSameShape(j2), 0)
+})
+
+test('shareSameShape: ancestor group offset folds into ref position', () => {
+	// mergeShapeLayers wraps duplicator content in a group whose tr.p carries the old
+	// layer position; copies nested under it must inherit that offset in their refs.
+	const staticFill = { a: 0, k: [0, 0.157, 0.204, 1] }
+	const grid = [dupGroup(0, 0, staticFill), dupGroup(40, 0, staticFill), dupGroup(80, 0, staticFill)]
+	const offsetParent = { ty: 'gr', it: [...grid, { ty: 'tr', p: { a: 0, k: [540, 1200] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: [0] }, o: { a: 0, k: 100 } }] }
+	const j = { w: 1080, h: 2400, layers: [layer({ shapes: [offsetParent] })] }
+	assert.equal(P.shareSameShape(j), 3)
+	const refs = j.layers.filter((L) => L.ty === 0)
+	assert.equal(refs.length, 3)
+	const pad = 2 * Math.max(1080, 2400, 1000)
+	// ref p = own cell + ancestor offset − pad (all three copies demote to refs)
+	const ps = refs.map((r) => r.ks.p.k.slice(0, 2)).map((v) => [v[0] + pad, v[1] + pad]).sort()
+	assert.deepEqual(ps, [[540, 1200], [580, 1200], [620, 1200]].sort())
+	// scaled ancestor -> copies excluded from sharing
+	const scaled = { ty: 'gr', it: [...grid, { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 1, k: [kf(0, [200, 200, 100], lin), kf(10, [200, 200, 100])] }, r: { a: 0, k: [0] }, o: { a: 0, k: 100 } }] }
+	const j2 = { w: 1080, h: 2400, layers: [layer({ shapes: [scaled] })] }
+	assert.equal(P.shareSameShape(j2), 0)
+})
+
+// ---------- binaryWindows ----------
+
+const blinkLayer = (keys, over = {}) => ({
+	ty: 4, ind: 1, ip: 0, op: 50, shapes: [], ...over,
+	ks: { o: { a: 1, k: keys }, p: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, a: { a: 0, k: [0, 0] } },
+})
+const hk = (t, v) => ({ t, s: [v], h: 1 })
+
+test('binaryWindows: hold-keyed 0/100 blink becomes window clones with no opacity keys', () => {
+	const j = { w: 100, h: 100, ip: 0, op: 50, layers: [blinkLayer([hk(0, 0), hk(10, 100), hk(20, 0), hk(30, 100), hk(40, 0)])] }
+	assert.equal(P.binaryWindows(j), 2)
+	assert.deepEqual(j.layers.map((l) => [l.ip, l.op]), [[10, 20], [30, 40]])
+	assert.ok(j.layers.every((l) => l.ks.o.a === 0 && l.ks.o.k === 100))
+})
+
+test('binaryWindows: leaves eased, non-binary and fully-on curves alone', () => {
+	const eased = [{ t: 0, s: [0], h: 1 }, { t: 10, s: [100], i: { x: [0.5], y: [1] }, o: { x: [0.5], y: [0] } }, { t: 20, s: [0], h: 1 }]
+	const je = { w: 100, h: 100, ip: 0, op: 30, layers: [blinkLayer(eased)] }
+	assert.equal(P.binaryWindows(je), 0)
+	const mid = [hk(0, 0), hk(10, 50), hk(20, 0)]
+	const jm = { w: 100, h: 100, ip: 0, op: 30, layers: [blinkLayer(mid)] }
+	assert.equal(P.binaryWindows(jm), 0)
+	const on = [hk(0, 100), hk(50, 100)]
+	const jo = { w: 100, h: 100, ip: 0, op: 50, layers: [blinkLayer(on)] }
+	assert.equal(P.binaryWindows(jo), 0)
+})
+
+test('binaryWindows: clamps windows to the layer ip/op', () => {
+	// layer lives 0-50 but the comp window is 10-30: the on-window [0,40] clamps to [10,30]
+	// — the layer is on for its whole visible range, so no split (trimToLayerRange handles
+	// the trim); binaryWindows only pays when the blink actually turns OFF in view
+	const j = { w: 100, h: 100, ip: 10, op: 30, layers: [blinkLayer([hk(0, 100), hk(40, 0)])] }
+	assert.equal(P.binaryWindows(j), 0)
+	// same when the off key sits outside the comp window: layer 0-50, comp 0-40 — on for
+	// the whole visible range → no split (the trim is trimToLayerRange's job)
+	const j2 = { w: 100, h: 100, ip: 0, op: 40, layers: [blinkLayer([hk(0, 100), hk(50, 0)])] }
+	assert.equal(P.binaryWindows(j2), 0)
+	// a window exactly matching the layer's range changes nothing → no split
+	const j3 = { w: 100, h: 100, ip: 0, op: 40, layers: [blinkLayer([hk(0, 100), hk(40, 0)])] }
+	assert.equal(P.binaryWindows(j3), 0)
+	assert.equal(j3.layers.length, 1)
+})
+
+test('binaryWindows: fill-opacity blink (static layer) splits the layer and clears the paint', () => {
+	const j = { w: 100, h: 100, ip: 0, op: 50, layers: [{ ty: 4, ind: 1, ip: 0, op: 50, ks: { o: { a: 0, k: 100 }, p: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, a: { a: 0, k: [0, 0] } }, shapes: [{ ty: 'gr', it: [{ ty: 'rc', p: { a: 0, k: [0, 0] }, s: { a: 0, k: [10, 10] } }, { ty: 'fl', c: { a: 0, k: [1, 0, 0, 1] }, o: { a: 1, k: [hk(0, 0), hk(10, 100), hk(20, 0), hk(30, 100), hk(40, 0)] } }, { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 } }] }] }] }
+	assert.equal(P.binaryWindows(j), 2)
+	assert.deepEqual(j.layers.map((l) => [l.ip, l.op]), [[10, 20], [30, 40]])
+	assert.ok(j.layers.every((l) => l.ks.o.a === 0 && l.ks.o.k === 100))
+	assert.ok(j.layers.every((l) => l.shapes[0].it[1].o.a === 0 && l.shapes[0].it[1].o.k === 100))
+	// two blinking paints would change their relative blink — refuse
+	const j2 = JSON.parse(JSON.stringify(j))
+	// restore the blink on one clone's fill to build a two-paint layer
+	const twoPaints = { w: 100, h: 100, ip: 0, op: 50, layers: [{ ty: 4, ind: 1, ip: 0, op: 50, ks: { o: { a: 0, k: 100 }, p: { a: 0, k: [0, 0] } }, shapes: [{ ty: 'gr', it: [{ ty: 'rc', p: { a: 0, k: [0, 0] }, s: { a: 0, k: [10, 10] } }, { ty: 'fl', c: { a: 0, k: [1, 0, 0, 1] }, o: { a: 1, k: [hk(0, 0), hk(10, 100), hk(20, 0)] } }, { ty: 'st', c: { a: 0, k: [0, 0, 0, 1] }, w: { a: 0, k: 2 }, o: { a: 1, k: [hk(0, 0), hk(10, 100), hk(20, 0)] } }, { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 } }] }] }] }
+	assert.equal(P.binaryWindows(twoPaints), 0)
+})
+
+test('binaryWindows: refuses layers with parents, mattes or animated transforms', () => {
+	const parented = { w: 100, h: 100, ip: 0, op: 50, layers: [blinkLayer([hk(0, 0), hk(10, 100), hk(20, 0)], { parent: 9 })] }
+	assert.equal(P.binaryWindows(parented), 0)
+	const matted = { w: 100, h: 100, ip: 0, op: 50, layers: [blinkLayer([hk(0, 0), hk(10, 100), hk(20, 0)], { tt: 1 })] }
+	assert.equal(P.binaryWindows(matted), 0)
+	// animated position: ks built by hand (blinkLayer's ks literal would override over.ks)
+	const moving = { w: 100, h: 100, ip: 0, op: 50, layers: [{ ty: 4, ind: 1, ip: 0, op: 50, shapes: [], ks: { o: { a: 1, k: [hk(0, 0), hk(10, 100), hk(20, 0)] }, p: { a: 1, k: [kf(0, [0, 0], lin), kf(20, [10, 0])] } } }] }
+	assert.equal(P.binaryWindows(moving), 0)
+})
