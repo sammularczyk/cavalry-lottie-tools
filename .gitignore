@@ -8,3 +8,7 @@ docs/
 dev/docs/
 dev/src/modules/buildInfo.js
 .preview
+dev/test/fixtures/cavalry-duplicator-grid.json
+find-dsh-config.js
+gridtest06_fixed.json
+dev/src/modules/cavalryExport.js.bak
