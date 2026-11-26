@@ -12,6 +12,8 @@ import { restructureDuplicators } from './modules/duplicatorRestructure.js'
 import { packImages } from './modules/images.js'
 import { gzipSize, zip, utf8, base64 } from './modules/zip.js'
 import { exportWithPrecomps } from './modules/precomps.js'
+import { needsTimingMeasurement, timingMeasurementPending, discardTimingMeasurement, prepareTimingMeasurement, collectTimingMeasurement, shouldRetryMeasurement } from './modules/duplicatorCompRefs.js'
+import { needsSubMeshMeasurement, prepareSubMeshMeasurement, collectSubMeshMeasurement, discardSubMeshMeasurement } from './modules/subMeshMeasure.js'
 import { BUILD_ID } from './modules/buildInfo.js'
 
 var GITHUB_REPO = 'sammularczyk/cavalry-lottie-tools'
@@ -23,7 +25,7 @@ var PREF_KEY = 'lottieTools_exporter' // old key kept so saved settings carry ov
 
 // Options that can change how the animation looks or which apps can use it. Everything
 // else is lossless and always on (hidden), so saved settings can't switch it off.
-var ADVANCED = ['precomps', 'gradientStrokeFills', 'recoverRigidMotion', 'simplifyKeys', 'simplifyPaths', 'roundPrecision', 'holdAll', 'refitEased', 'stripNames', 'embedImages', 'jpegImages', 'pretty', 'duplicators']
+var ADVANCED = ['precomps', 'gradientStrokeFills', 'recoverRigidMotion', 'shareDuplicatorAnimation', 'simplifyKeys', 'simplifyPaths', 'roundPrecision', 'holdAll', 'refitEased', 'stripNames', 'embedImages', 'jpegImages', 'pretty', 'duplicators']
 var ALWAYS = { exponent: true }
 PASSES.forEach(function (p) {
 	if (ADVANCED.indexOf(p.id) < 0) ALWAYS[p.id] = p.on
@@ -241,7 +243,7 @@ function selectedComp() {
 }
 
 // -> { json, dirs, note }
-function exportSelected() {
+function exportSelected(measured) {
 	// a playback range narrower than the comp is the part meant to ship: export just that
 	var comp = selectedComp()
 	var range = {}
@@ -251,14 +253,14 @@ function exportSelected() {
 	var narrow = range.playbackStart > range.startFrame || range.playbackEnd < range.endFrame
 	if (narrow) api.set(comp, { startFrame: range.playbackStart, endFrame: range.playbackEnd })
 	try {
-		return exportRange()
+		return exportRange(measured)
 	} finally {
 		if (narrow) api.set(comp, range)
 	}
 }
 
-function exportRange() {
-	var opts = { bakeMode: settings.bakeMode > 0 ? settings.bakeMode - 1 : null, outlineGradientStrokes: settings.gradientStrokeFills, duplicators: settings.duplicators }
+function exportRange(measured) {
+	var opts = { bakeMode: settings.bakeMode > 0 ? settings.bakeMode - 1 : null, outlineGradientStrokes: settings.gradientStrokeFills, duplicators: settings.duplicators, measuredTiming: measured && measured.timing, measuredPoints: measured && measured.points, measuredSubMesh: measured && measured.subMesh }
 	if (!settings.precomps) {
 		var e = exportComp(selectedComp(), opts)
 		return { json: e.json, dirs: [e.dir], note: '' }
@@ -285,6 +287,7 @@ var ROW_TEXT = {
 	embedImages: ['Embed images in the file', 'Puts images inside the JSON, so it’s one file to hand over. Images grow by a third when embedded. Off: images are saved in an images folder next to the file. A .lottie always holds its images.', 'One file, nothing to lose'],
 	jpegImages: ['Save opaque images as JPEG', 'Images with no transparency are saved as JPEG (85% quality) when that’s smaller. Slight JPEG softening. macOS only; Cavalry asks you to trust the script the first time.', 'Smaller, slightly softer'],
 	pretty: ['Pretty print', 'Spaced out so people can read it. Much larger; use for debugging only.', 'Readable, much larger'],
+	shareDuplicatorAnimation: ['Share a duplicator’s animation as one precomp', 'When the copies of a duplicator share one animation, differing only by a time offset, the curve is written once and each copy references it with its own start. Needs the baked transforms to be recovered first, so it runs straight after that pass.', 'One curve instead of 91. Biggest saving on staggered grids.'],
 	duplicators: ['Restructure duplicators as precomps', 'Replaces duplicated shape groups with a shared precomp + per-copy offset transforms. Cuts 3.8 MB → 1.6 MB on Composition 4c. May not play in all Lottie players.', '59% smaller on large grids'],
 }
 PASSES.forEach(function (p) {
@@ -549,28 +552,219 @@ function runOptimiseFile() {
 	if (!path) return
 	var lj = JSON.parse(api.readFromFile(path))
 
-	// Run duplicator restructure if enabled in settings
-	if (settings.duplicators) {
+	optimiseAndWrite(lj, path.replace(/(\.min)?\.json$/i, '') + '.min.json', [], [api.getFolderFromPath(path)])
+}
+
+// --- deferred timing measurement ---------------------------------------------
+// Comp-reference duplicators whose per-copy time offset Cavalry won't decode (a
+// driver that isn't a stagger) are measured in a THROWAWAY comp, never in the
+// user's own. Cavalry only re-evaluates a duplicator's per-copy sample time in a
+// LATER script execution: a render in the same run bakes every copy at one time
+// and decodes to all zeros. A Timer callback fires in the panel's idle event
+// loop, which is that later execution — verified, the deferred render decodes
+// the real offsets to the last decimal. A ui.Modal's nested loop does NOT count.
+//
+// So one Export click does the whole job: ask for the destination, build the
+// probe, arm a Timer, return, and finish the export from the callback.
+var TIMING_TIMER_MS = 600 // long enough for the panel to go idle
+var TIMING_RETRY_MS = 1500
+var deferredTiming = null // { comp, out, attempt } while a measurement is armed
+var deferredTimer = null // keep the armed Timer referenced so it cannot be collected
+
+// Every step below can only cost the time offsets: the export itself still runs,
+// and the reason lands in the report instead of failing silently.
+function failMeasurement(reason) {
+	console.error(TAG + reason)
+	return { timing: {}, points: {}, notes: ['The timing could not be measured; copies export without time offsets'] }
+}
+
+function exportWithMeasurement(comp, out, measurement) {
+	if (selectedComp() !== comp) {
+		console.warn(TAG + 'Export cancelled: the active comp changed while the timing was being measured.')
+		return
+	}
+	var exported = exportSelected(measurement)
+	var note = exported.note || ''
+	for (var n of measurement.notes) note += (note ? '\n' : '') + '⚠ ' + n
+	optimiseAndWrite(exported.json, out, note ? [note] : [], exported.dirs)
+}
+
+function armMeasurement(delayMs) {
+	try {
+		var timer = new api.Timer({ onTimeout: runDeferredMeasurement })
+		timer.setRepeating(false)
+		timer.setInterval(delayMs)
+		deferredTimer = timer // a local-only Timer could be collected before it fires
+		timer.start()
+		return true
+	} catch (e) {
+		deferredTimer = null
+		console.error(TAG + 'Could not start the timing measurement: ' + (e && e.message))
+		return false
+	}
+}
+
+function noTiming() {
+	return { timing: {}, points: {}, notes: [] }
+}
+
+// Sub-mesh measurement: collected once, retried once when the bake came back
+// before Cavalry re-evaluated the sampler. Returns true when a retry is wanted.
+function collectSubMesh(job) {
+	if (!job.subState) return false
+	var res
+	try {
+		res = collectSubMeshMeasurement(job.subState)
+	} catch (e) {
+		res = { values: {}, notes: ['Per-copy sub-mesh visibility could not be measured: ' + (e && e.message)] }
+	}
+	job.subState = null
+	job.subResult = res
+	return !!res.stale && job.subAttempt < 2
+}
+
+function runDeferredMeasurement() {
+	var job = deferredTiming
+	deferredTimer = null
+	if (!job) return
+	busy = true
+	try { ui.setCallbacksActive(false) } catch (e) {}
+	var subRetry = collectSubMesh(job)
+	var retry = false
+	var measurement = job.timingResult || null
+	if (job.timing && !measurement) {
 		try {
-			console.log(TAG + 'Running duplicator restructure...')
-			restructureDuplicators(lj, { duplicators: true })
-			console.log(TAG + 'Restructure done. assets=' + (lj.assets ? lj.assets.length : 0) + ', layers=' + lj.layers.length)
+			measurement = collectTimingMeasurement(job.comp)
 		} catch (e) {
-			console.warn(TAG + 'Restructure failed: ' + e.message)
+			measurement = failMeasurement('Timing measurement failed: ' + (e && e.message))
+		}
+		if (shouldRetryMeasurement(measurement, job.attempt)) {
+			// All zeros means the bake was read before Cavalry re-evaluated the
+			// duplicator. Try once more on a longer delay before giving up.
+			job.attempt = 2
+			try {
+				prepareTimingMeasurement(job.comp)
+				measurement = null
+				retry = true
+			} catch (e) {
+				console.error(TAG + 'Retrying the timing measurement failed: ' + (e && e.message))
+			}
+		}
+		job.timingResult = measurement
+	}
+	// Rebuilt AFTER the timing probe, for the same snapshot reason as in runExport.
+	if (subRetry) {
+		job.subAttempt = 2
+		try {
+			job.subState = prepareSubMeshMeasurement(job.comp)
+			if (job.subState) { job.subResult = null; retry = true }
+		} catch (e) {
+			console.error(TAG + 'Retrying the sub-mesh measurement failed: ' + (e && e.message))
 		}
 	}
-
-	optimiseAndWrite(lj, path.replace(/(\.min)?\.json$/i, '') + '.min.json', [], [api.getFolderFromPath(path)])
+	if (retry && armMeasurement(TIMING_RETRY_MS)) {
+		busy = false
+		try { ui.setCallbacksActive(true) } catch (e) {}
+		return
+	}
+	// A retry that could not be armed: drop whatever probe it built.
+	try { if (job.subState) discardSubMeshMeasurement(job.subState) } catch (e) {}
+	try { if (job.timing && !job.timingResult) discardTimingMeasurement() } catch (e) {}
+	if (!measurement) measurement = job.timing ? failMeasurement('The timing measurement could not be retried.') : noTiming()
+	var sub = job.subResult || { values: {}, notes: [] }
+	measurement.subMesh = sub.values
+	measurement.notes = (measurement.notes || []).concat(sub.notes)
+	deferredTiming = null
+	busy = false
+	try { ui.setCallbacksActive(true) } catch (e) {}
+	try {
+		exportWithMeasurement(job.comp, job.out, measurement)
+	} finally {
+		// The measurements render throwaway comps and delete them. Put the comp
+		// the user had open back, so a finished export does not strand them on
+		// another comp (or on one that no longer exists).
+		try { if (job.from && api.layerExists(job.from)) api.setActiveComp(job.from) } catch (e) {}
+		try { if (job.frame != null) api.setFrame(job.frame) } catch (e) {}
+	}
 }
 
 function runExport() {
 	var comp = selectedComp()
 	if (!comp) return
+	// The comp the user is looking at, captured before anything else touches the
+	// scene: the dropdown selection and the open comp can differ, and this is what
+	// has to be open again once the export finishes.
+	var from = null, fromFrame = null
+	try { from = api.getActiveComp(); fromFrame = api.getFrame() } catch (e) {}
+	var timing = false
+	try {
+		timing = settings.duplicators && settings.precomps && needsTimingMeasurement(comp)
+	} catch (e) { timing = false }
+	var subMesh = false
+	try { subMesh = needsSubMeshMeasurement(comp) } catch (e) { subMesh = false }
+	if (timing || subMesh) {
+		if (deferredTiming) {
+			console.log(TAG + 'A measurement is already running; the export finishes in a moment.')
+			return
+		}
+		// A measurement left behind by an interrupted run cannot be trusted (its
+		// probe comp may be half-deleted), so drop it and start clean.
+		try { if (timingMeasurementPending()) discardTimingMeasurement() } catch (e) {}
+		// Ask for the destination FIRST: a cancelled dialog must not build a probe.
+		var outM = api.presentSaveFile(api.getProjectPath() || api.getDesktopFolder(), 'Export Lottie', 'Lottie JSON (*.json)', api.getNiceName(comp) + '.json')
+		if (!outM) return
+		if (!/\.json$/i.test(outM)) outM += '.json'
+		if (typeof api.Timer !== 'function') {
+			// No Timer in this Cavalry build: export now and say so in the report.
+			var none = timing ? failMeasurement('This Cavalry build has no api.Timer, so the per-copy timing cannot be measured.') : noTiming()
+			if (subMesh) none.notes.push('This Cavalry build has no api.Timer, so per-copy sub-mesh visibility cannot be measured.')
+			exportWithMeasurement(comp, outM, none)
+			return
+		}
+		var job = { comp: comp, out: outM, attempt: 1, subAttempt: 1, from: from, frame: fromFrame, timing: false, subState: null }
+		var setupNotes = []
+		// Timing first: the sub-mesh probe snapshots the scene and later deletes
+		// everything newer than that snapshot, which must not include this probe.
+		if (timing) {
+			try {
+				prepareTimingMeasurement(comp)
+				job.timing = true
+			} catch (e) {
+				try { discardTimingMeasurement() } catch (err) {}
+				job.timingResult = failMeasurement('Timing measurement setup failed: ' + (e && e.message))
+				job.timing = true
+			}
+		}
+		if (subMesh) {
+			try {
+				job.subState = prepareSubMeshMeasurement(comp)
+			} catch (e) {
+				setupNotes.push('Per-copy sub-mesh visibility could not be measured: ' + (e && e.message))
+			}
+			if (!job.subState) job.subResult = { values: {}, notes: setupNotes }
+		}
+		deferredTiming = job
+		if (!armMeasurement(TIMING_TIMER_MS)) {
+			deferredTiming = null
+			try { discardTimingMeasurement() } catch (e) {}
+			try { if (job.subState) discardSubMeshMeasurement(job.subState) } catch (e) {}
+			var failed = timing ? failMeasurement('The timing measurement could not be started.') : noTiming()
+			if (subMesh) failed.notes.push('The sub-mesh measurement could not be started; its copies stay visible.')
+			exportWithMeasurement(comp, outM, failed)
+			return
+		}
+		console.log(TAG + 'Measuring per-copy values, then exporting…')
+		return
+	}
 	var out = api.presentSaveFile(api.getProjectPath() || api.getDesktopFolder(), 'Export Lottie', 'Lottie JSON (*.json)', api.getNiceName(comp) + '.json')
 	if (!out) return
 	if (!/\.json$/i.test(out)) out += '.json'
 	var exported = exportSelected()
 	optimiseAndWrite(exported.json, out, exported.note ? [exported.note] : [], exported.dirs)
+	// The exporter opens comps to sample them; leave the user on the comp and
+	// frame they were on rather than wherever the last sample finished.
+	try { if (from && api.layerExists(from)) api.setActiveComp(from) } catch (e) {}
+	try { if (fromFrame != null) api.setFrame(fromFrame) } catch (e) {}
 }
 
 // ---------- window ----------

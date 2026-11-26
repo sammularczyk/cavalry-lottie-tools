@@ -19,7 +19,7 @@
 // the rectangle is safe: the rectangle only ever exists inside the throwaway
 // bake, and each baked group's content corresponds to shapes[i % numShapes].
 
-import { compLayers } from './cavalryExport.js'
+import { compLayers, inputSources } from './cavalryExport.js'
 
 const compOf = (ref) => String(api.getInConnection(ref, 'composition') || '').replace(/\.id$/, '')
 
@@ -45,9 +45,14 @@ const COMP_REF_TIME_SCALE = 2
 // distribution point (Lottie space, y-down, the duplicator's shape* attributes
 // already baked into the path coordinates).
 
-function rawBake(compId) {
-	const dir = api.getTempFolder() + '/dcr-sampler-' + Date.now()
-	api.makeFolder(dir)
+// Reuse one temp folder across bakes instead of minting a new one per render,
+// and delete the rendered json as soon as it is parsed. Date.now() in the name
+// left 39 orphaned dcr-sampler-* folders in the temp dir.
+export function rawBake(compId) {
+	const dir = api.getTempFolder() + '/dcr-sampler'
+	if (!api.isDirectory(dir)) api.makeFolder(dir)
+	// a stale export from a crashed run must not be mistaken for this render
+	try { if (api.filePathExists(dir + '/export.json')) api.deleteFilePath(dir + '/export.json') } catch (e) {}
 	const rq = api.addRenderQueueItem(compId)
 	try {
 		api.setGenerator(rq, 'generator', 'renderLottie')
@@ -62,17 +67,20 @@ function rawBake(compId) {
 		api.deleteLayer(rq)
 	}
 	const file = dir + '/export.json'
-	return JSON.parse(api.readFromFile(file))
+	const json = JSON.parse(api.readFromFile(file))
+	try { api.deleteFilePath(file) } catch (e) {}
+	return json
 }
 
 // Remove every current input from the duplicator's shapes slot. Disconnecting
 // 'shapes.0' repeatedly works because the list recompacts after each removal.
+// The list is enumerated from the serialised scene graph rather than by probing
+// slot indices: getInConnection on an index past the last entry logs
+// "Couldn't find attribute with path: <dup>.shapes.N", which is the console
+// spam this pass used to produce on every export.
 function clearShapes(dup) {
-	for (let guard = 0; guard < 512; guard++) {
-		let raw = null
-		try { raw = api.getInConnection(dup, 'shapes.0') } catch (e) { break }
-		if (raw == null || raw === '') break
-		try { api.disconnect(String(raw).replace(/\.id$/, ''), 'id', dup, 'shapes.0') } catch (e) { break }
+	for (const src of inputSources(dup) || []) {
+		try { api.disconnect(src, 'id', dup, 'shapes.0') } catch (e) { break }
 	}
 }
 
@@ -160,6 +168,302 @@ function seriesToPoints(series) {
 function sampleTimes(seriesA, nominal) {
 	if (!nominal) return null
 	return { constant: nominal.slice().reverse() }
+}
+
+// --- timing measurement in a throwaway comp ---------------------------------
+// A driver that is not a stagger (random, noise, ...) cannot be decoded: its
+// per-index values live inside the driver and the duplicator gives its inputs
+// no index context to read them with. They CAN be measured. A rectangle whose
+// width is keyframed 0→100 across the comp's range, used as the duplicator's
+// input, bakes each copy at that copy's sample time, and each copy's path
+// centre at frame 0 is that copy's distribution point.
+//
+// A freshly keyframed sampler only reaches such a bake when the render happens
+// in a LATER script execution. Cavalry evaluates a duplicator's per-copy input
+// at a scene boundary no single script can force: double renders, awaits and
+// render-queue setup scripts all bake it frozen, and every one reads back as a
+// uniform all-zero offset. So the measurement spans two Export clicks.
+//
+// The measurement runs entirely in a THROWAWAY comp holding deep duplicates of
+// the duplicators. It never touches the user's own layers, so neither click can
+// leave the scene broken — the only visible trace is one scratch comp that is
+// deleted once the measurement is read. Deep duplicates were verified to
+// reproduce the original exactly: the duplicated driver keeps every setting
+// (minimum, maximum, seed, strength, index mode) and two independent duplicates
+// of the same duplicator measure identical offsets.
+
+const timingMarkerFile = () => api.getTempFolder() + '/lottie-optimiser-timing.json'
+
+// Duplicators whose timing cannot be decoded analytically: a comp reference
+// inside and a shapeTimeOffset driven by something other than a stagger.
+function compRefDuplicators(comp) {
+	const out = []
+	for (const dup of compLayers(comp).filter((id) => api.getLayerType(id) === 'duplicator')) {
+		const sources = inputSources(dup)
+		if (!sources || !sources.length) continue
+		if (!sources.some((s) => api.getLayerType(s) === 'compositionReference')) continue
+		let raw = null
+		try { raw = api.getInConnection(dup, 'shapeTimeOffset') } catch (e) { raw = null }
+		if (raw == null || raw === '') continue // static: decoded analytically
+		const driver = String(raw).replace(/\.id$/, '')
+		let type = ''
+		try { type = api.getLayerType(driver) } catch (e) { type = '' }
+		if (type === 'stagger') continue // decoded analytically
+		out.push({ dup, sources })
+	}
+	return out
+}
+
+export function needsTimingMeasurement(comp) {
+	try { return compRefDuplicators(comp).length > 0 } catch (e) { return false }
+}
+
+// Every layer id in the scene, so a cleanup can find the orphans that deleting a
+// comp leaves behind (deleting a comp does not remove everything created inside
+// it; the remainder becomes parentless scene debris).
+function sceneLayerIds() {
+	try { return api.getAllSceneLayers().slice() } catch (e) { return null }
+}
+
+// Remove exactly the layers the measurement created. `created` is the ledger the
+// prepare step recorded, so this never touches anything else in the scene — a
+// "everything that appeared since click 1" sweep would also delete layers the
+// user added between the two clicks.
+function cleanupProbe(created) {
+	for (const id of created || []) {
+		try { if (api.layerExists(id)) api.deleteLayer(id) } catch (e) {}
+	}
+}
+
+// The layers that exist now but did not before — the measurement's own debris.
+function newLayersSince(before) {
+	if (!before) return []
+	const keep = new Set(before)
+	try { return api.getAllSceneLayers().filter((id) => !keep.has(id)) } catch (e) { return [] }
+}
+
+// Put the user's comp and frame back after a measurement. Rendering makes the
+// probe comp active, and the probe is deleted straight after, so anything that
+// reads the active comp later (the export capturing what to restore) would
+// otherwise see a comp that no longer exists. The frame is set first: setting
+// it can itself move the playhead of whatever comp is open.
+function restoreActive(compId, frame) {
+	if (compId) {
+		try { if (api.layerExists(compId)) api.setActiveComp(compId) } catch (e) {}
+	}
+	if (frame != null) {
+		try { api.setFrame(frame) } catch (e) {}
+	}
+}
+
+// A marker is only usable when every id it names still exists AND the sampler
+// still carries its two keyframes. A stale marker (scene reopened, edited, or
+// the probe half-deleted) must trigger a fresh measurement rather than a throw.
+// `comp` scopes it further: a measurement set up for one comp must never be
+// spent on another.
+export function readProbeState(comp) {
+	let state = null
+	try {
+		const file = timingMarkerFile()
+		if (!api.filePathExists(file)) return null
+		state = JSON.parse(api.readFromFile(file))
+	} catch (e) { return null }
+	if (!state || !state.comp || !Array.isArray(state.probes) || !state.probes.length) return null
+	if (!api.layerExists(state.comp)) return null
+	if (comp && state.comp !== comp) return null
+	for (const p of state.probes) {
+		if (!p || !p.dup || !api.layerExists(p.dup)) return null
+		if (!p.rect || !api.layerExists(p.rect)) return null
+		let keys = 0
+		try { keys = api.getKeyframeIdsForAttribute(p.rect, 'generator.dimensions.x').length } catch (e) { keys = 0 }
+		if (keys !== 2) return null
+	}
+	return state
+}
+
+// True when a measurement set up by an earlier click is ready to be read.
+export function timingMeasurementPending(comp) {
+	return readProbeState(comp) != null
+}
+
+// Drop a pending measurement without using it: the probe comp, its samplers and
+// the marker all go. Safe to call when nothing is pending.
+export function discardTimingMeasurement() {
+	// read the marker even when it no longer validates: it still names the debris
+	let raw = null
+	try { raw = api.filePathExists(timingMarkerFile()) ? JSON.parse(api.readFromFile(timingMarkerFile())) : null } catch (e) { raw = null }
+	if (raw && (raw.created || raw.probeComp)) cleanupProbe(raw.created || [raw.probeComp])
+	try { api.deleteFilePath(timingMarkerFile()) } catch (e) {}
+}
+
+// Click 1: build the throwaway measurement comp. The user's comp and its
+// duplicators are only READ here — nothing is connected, cleared or reparented.
+export function prepareTimingMeasurement(comp) {
+	const cfg = {}
+	for (const a of ['resolution', 'fps', 'startFrame', 'endFrame', 'playbackStart', 'playbackEnd']) {
+		try { cfg[a] = api.get(comp, a) } catch (e) {}
+	}
+	const start = Number(cfg.startFrame) || 0
+	const last = (Number(cfg.endFrame) || start) - start
+	const before = sceneLayerIds()
+	let probeComp = null
+	const probes = []
+	let created = []
+	try {
+		probeComp = api.createComp('dcr-probe')
+		if (!probeComp || !api.layerExists(probeComp)) throw new Error('could not create the measurement comp')
+		api.set(probeComp, cfg)
+		api.setActiveComp(probeComp)
+		for (const { dup } of compRefDuplicators(comp)) {
+			const copy = api.duplicate(dup, true)
+			if (!copy || !api.layerExists(copy)) throw new Error('could not duplicate ' + (api.getNiceName(dup) || dup))
+			api.parent(copy, probeComp)
+			// the sampler lives in the comp, never on the duplicator: parenting a
+			// sampler into the duplicator breaks its bake entirely
+			const rect = api.primitive('rectangle', 'dcr-probe-sampler')
+			if (!rect || !api.layerExists(rect)) throw new Error('could not create the sampler shape')
+			api.parent(rect, probeComp)
+			api.set(rect, { 'generator.dimensions.x': 0, 'generator.dimensions.y': 2 })
+			api.keyframe(rect, start, { 'generator.dimensions.x': 0 })
+			api.keyframe(rect, start + last, { 'generator.dimensions.x': 100 })
+			if (api.getKeyframeIdsForAttribute(rect, 'generator.dimensions.x').length !== 2) throw new Error('sampler keyframes missing')
+			clearShapes(copy)
+			api.connect(rect, 'id', copy, 'shapes')
+			probes.push({ src: dup, dup: copy, rect })
+		}
+		if (!probes.length) throw new Error('no duplicator to measure')
+		created = newLayersSince(before)
+		api.writeToFile(timingMarkerFile(), JSON.stringify({ comp, probeComp, start, last, created, probes }), true)
+	} catch (e) {
+		cleanupProbe(created.length ? created : newLayersSince(before))
+		try { api.deleteFilePath(timingMarkerFile()) } catch (err) {}
+		throw e
+	} finally {
+		try { api.setActiveComp(comp) } catch (e) {}
+	}
+	return probes.length
+}
+
+// The x span of a path value at one keyframe (the baked rectangle's width).
+function spanX(v) {
+	let lo = Infinity, hi = -Infinity
+	for (const p of v) { if (p[0] < lo) lo = p[0]; if (p[0] > hi) hi = p[0] }
+	return hi - lo
+}
+
+// Width series of one copy's first shape: [{ t, w }, ...]
+export function widthSeries(ks) {
+	const out = []
+	if (ks.a === 1 && Array.isArray(ks.k)) {
+		for (const kf of ks.k) {
+			if (!kf.s || !kf.s[0] || !kf.s[0].v) return null
+			out.push({ t: kf.t, w: spanX(kf.s[0].v) })
+		}
+	} else if (ks.k && ks.k.v) out.push({ t: 0, w: spanX(ks.k.v) })
+	else return null
+	return out.length ? out : null
+}
+
+const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s[(s.length - 1) >> 1] }
+
+// One copy's sample-time offset from its baked width series: the rectangle is
+// w(t) = clamp(t + off, 0, last) · 100/last, so interior frames give
+// off = w·last/100 − t directly. When the sweep is clipped, only one edge
+// survives: a copy sampled past the end is at full width on frame 0 (off ≥ last),
+// one sampled before the start first rises at t = −off.
+export function offsetFromWidth(ws, last) {
+	const mid = ws.filter((f) => f.w > 0.5 && f.w < 99.5).map((f) => (f.w * last) / 100 - f.t)
+	if (mid.length) return Math.round(median(mid) * 100) / 100
+	if (!ws.length) return null
+	// full width from the first frame means the whole sweep happened before frame 0
+	if (ws[0].w > 99.5) return Math.round(last * 100) / 100
+	const rise = ws.find((f) => f.w > 0.5)
+	if (rise) return Math.round(-rise.t * 100) / 100
+	return null
+}
+
+// Click 2: render the throwaway comp (its keyframed samplers survive across the
+// script boundary), decode each duplicate's per-copy offsets, then delete the
+// probe comp and every layer it created. Returns { comp, timing, points, notes }.
+// timing maps ORIGINAL duplicator id → per-copy offsets in the bake's copy order
+// at the 1x shape-input scale; points maps the same to per-copy path centres.
+export function collectTimingMeasurement(comp) {
+	const state = readProbeState(comp)
+	// Rendering makes the probe comp active and the probe is deleted below, so the
+	// comp Cavalry has open is put back before this returns. The export that
+	// follows captures the active comp as the one to restore, and a deleted comp
+	// cannot be reopened.
+	const userFrame = api.getFrame()
+	if (!state) {
+		// no usable measurement: never throw out of here, and never leave a marker
+		// behind that would send the next click down the same dead end
+		restoreActive(comp, userFrame)
+		try { api.deleteFilePath(timingMarkerFile()) } catch (e) {}
+		return { comp: null, timing: {}, points: {}, notes: [] }
+	}
+	const notes = []
+	const timing = {}
+	const points = {}
+	try {
+		const bake = rawBake(state.probeComp)
+		const ids = new Set(compLayers(state.probeComp))
+		for (const e of state.probes) {
+			const name = api.getNiceName(e.src) || e.src
+			const layer = (bake.layers || []).find((L) => L.ty === 4 && sceneId(L.mn, ids) === e.dup)
+			const outer = layer && layer.shapes && layer.shapes[0]
+			const groups = outer && outer.ty === 'gr' ? outer.it.filter((it) => it.ty === 'gr') : []
+			if (!groups.length) {
+				notes.push('The timing of ' + name + ' could not be measured; its copies export without time offsets')
+				continue
+			}
+			const offs = []
+			const pts = []
+			for (const g of groups) {
+				const sh = (g.it || []).filter((it) => it.ty === 'sh')[0]
+				const ws = sh && sh.ks ? widthSeries(sh.ks) : null
+				const off = ws ? offsetFromWidth(ws, state.last) : null
+				if (off == null) break
+				offs.push(off)
+				pts.push(sh && sh.ks ? pathCentreOf(sh.ks) : null)
+			}
+			// a real driver (stagger, random, keyed) nearly never lands every copy on
+			// the same offset; all-zero is the signature of a bake that never saw the
+			// sampler (a sampler created in the same run as the render does exactly
+			// that) — refuse it rather than shipping silent copies
+			if (offs.length === groups.length && offs.some((o) => o !== 0)) {
+				timing[e.src] = offs
+				if (pts.every(Boolean)) points[e.src] = pts
+			} else {
+				notes.push('The timing of ' + name + ' could not be measured; its copies export without time offsets')
+			}
+		}
+		return { comp: state.comp, timing, points, notes }
+	} finally {
+		cleanupProbe(state.created || [state.probeComp])
+		try { api.deleteFilePath(timingMarkerFile()) } catch (e) {}
+		restoreActive(comp, userFrame)
+	}
+}
+
+// The centre of a baked shape's path at its first keyframe.
+export function pathCentreOf(ks) {
+	let v = null
+	if (ks.a === 1 && Array.isArray(ks.k) && ks.k.length) v = ks.k[0].s && ks.k[0].s[0] && ks.k[0].s[0].v
+	else if (ks.k && ks.k.v) v = ks.k.v
+	return v ? pathCentre(v) : null
+}
+
+// How many attempts a deferred measurement gets before it gives up and exports
+// without offsets. A deferred render bakes correctly on the first try, so a
+// second attempt only helps when the render landed before the panel went idle.
+// Never retry more than once: a driver that really cannot be measured must not
+// turn one Export click into a loop.
+export const MAX_MEASUREMENT_ATTEMPTS = 2
+
+export function shouldRetryMeasurement(measurement, attempt) {
+	const timing = (measurement && measurement.timing) || {}
+	const measured = Object.keys(timing).length > 0
+	return !measured && attempt < MAX_MEASUREMENT_ATTEMPTS
 }
 
 // The nominal per-copy offset (frames, distribution index order) from the
@@ -257,7 +561,10 @@ function sampleDistribution(comp, dup, sources, ids, warn, name) {
 // --- the pass ---------------------------------------------------------------
 // Returns { refs, warnings } after rewriting exported.layers in place; newComp is
 // called to build each referenced comp once (it must return { fr, w, h, layers? }).
-export function duplicatorCompRefs(comp, exported, sceneOf, newComp) {
+// measuredTiming (from a prior collectTimingMeasurement, when present) maps a
+// duplicator id → per-copy offsets in the bake's copy order at the 1x scale;
+// comp-ref copies sample at 2x, so those are doubled here.
+export function duplicatorCompRefs(comp, exported, sceneOf, newComp, measuredTiming, measuredPoints) {
 	const warnings = []
 	const warn = warnings.push.bind(warnings)
 	const frame = api.getFrame()
@@ -268,16 +575,10 @@ export function duplicatorCompRefs(comp, exported, sceneOf, newComp) {
 
 		for (const dup of dups) {
 			try {
-				// which input shapes feed this duplicator? (private slot; probe per entry;
-				// a missing entry throws and getInConnection answers "")
-				const sources = []
-				for (let s = 0; s < 16; s++) {
-					let raw = null
-					try { raw = api.getInConnection(dup, 'shapes.' + s) } catch (e) { break }
-					if (raw == null || raw === '') break
-					sources.push(String(raw).replace(/\.id$/, ''))
-				}
-				if (!sources.length) continue
+				// which input shapes feed this duplicator? (its private shapes slot,
+				// read from the scene graph so a short list never logs an attribute error)
+				const sources = inputSources(dup)
+				if (!sources || !sources.length) continue
 				const isCompSource = sources.map((s) => api.getLayerType(s) === 'compositionReference')
 				if (!isCompSource.some(Boolean)) continue // nothing for this pass to do
 				const inners = [...new Set(sources.filter((s, i) => isCompSource[i]).map(compOf))]
@@ -289,14 +590,20 @@ export function duplicatorCompRefs(comp, exported, sceneOf, newComp) {
 					|| exported.layers.find((L) => L.ty === 4 && sceneId(L.mn, ids) === dup)
 				if (!layer) continue
 
-				// distribution points: one sampler bake works for every distribution
-				// type, animated or not. The baked positions already include the
-				// duplicator's shape* position, so they are used as-is.
-				const seriesA = sampleDistribution(comp, dup, sources, ids, warn, name)
-				if (!seriesA) continue
-				const count = seriesA.length
+				// distribution points: prefer the throwaway-comp measurement (it also
+				// carries the timing), else one sampler bake works for every
+				// distribution type, animated or not
+				const measuredPts = measuredPoints && measuredPoints[dup]
+				let seriesA = null
+				if (!measuredPts) {
+					seriesA = sampleDistribution(comp, dup, sources, ids, warn, name)
+					if (!seriesA) continue
+				}
+				const count = measuredPts ? measuredPts.length : seriesA.length
 				if (count < 2 || count > 4096) continue // degenerate: leave the bake
-				const sample = seriesToPoints(seriesA)
+				const sample = measuredPts
+					? { moving: false, points: measuredPts.map((c) => ({ a: 0, k: [c[0], c[1], 0] })) }
+					: seriesToPoints(seriesA)
 
 				// static shape* attributes other than position still apply to the
 				// precomp layers (the sampler bake only encodes position)
@@ -310,9 +617,14 @@ export function duplicatorCompRefs(comp, exported, sceneOf, newComp) {
 				// list, extend it for the hold-on-first/last-frame behaviour (below)
 				const built = inners.map((inner) => newComp(inner, dup))
 
-				// per-copy sample times (frames) from the empirical 2x law (see the
-				// timing note): nominal offsets reversed into the bake's copy order
-				const timing = sampleTimes(seriesA, nominalOffsets(dup, count, warn, name))
+				// per-copy sample times (frames): measured offsets (two-click flow,
+				// shape-input 1x scale → 2x for comp refs) when available, else the
+				// analytic ladder (see the timing note), reversed into the bake's copy
+				// order
+				const measured = measuredTiming && measuredTiming[dup]
+				const timing = measured
+					? { constant: measured.map((o) => COMP_REF_TIME_SCALE * o) }
+					: seriesA ? sampleTimes(seriesA, nominalOffsets(dup, count, warn, name)) : null
 				if (!timing) {
 					warn('The timing of ' + name + ' could not be decoded; the copies export without time offsets')
 				}

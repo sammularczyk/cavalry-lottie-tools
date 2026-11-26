@@ -1282,7 +1282,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 					for (const a of built.assets || []) if (!assets.some((b) => b.id === a.id)) assets.push(a)
 				}
 				return { id: cache[key], fr: exported.fr, w: compSize(inner)[0], h: compSize(inner)[1], layers }
-			})
+			}, opts.measuredTiming, opts.measuredPoints)
 			if (builtRefs.refs) refs += builtRefs.refs
 			for (const w of builtRefs.warnings) warnings.push(w)
 		}

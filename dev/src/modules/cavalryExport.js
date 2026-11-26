@@ -1,7 +1,7 @@
 // Export a comp with Cavalry's own Lottie writer, through a temporary Render Queue Item.
 // The scene is left as it was: bake overrides are restored and the queue item deleted.
 
-import { visibilitySequenceMask, expressionMask, applyMasksToGroups } from './submeshVisibility.js'
+import { visibilitySequenceMask, expressionValues, gateOf, clampOpacity, oscillatorSeries, oscillatorPhaseFromSamples, applyValuesToGroups, alignedPairs } from './submeshVisibility.js'
 
 // forceLottieBake values, in Cavalry's order.
 export var BAKE_MODES = ['Automatic', 'Animated Mesh', 'Animated Mesh & Materials', 'Nuclear', 'Still']
@@ -17,6 +17,25 @@ export function compLayers(compId) {
 	}
 	walk(compId)
 	return out
+}
+
+// The node ids connected into a layer's `slot` list (a duplicator's `shapes`),
+// in slot order. Reads the serialised scene graph: probing slot.N through
+// getInConnection throws — and logs "Couldn't find attribute with path" — as
+// soon as N passes the last entry, which spammed the console on every export.
+export function inputSources(layerId, slot) {
+	var nodes = null
+	var attr = slot || 'shapes'
+	try { nodes = JSON.parse([].concat(api.serialise([layerId], false)).join('')) } catch (e) { return [] }
+	var prefix = layerId + '.' + attr + '.'
+	var out = []
+	;(nodes && nodes.connections || []).forEach(function (c) {
+		var to = String(c.to)
+		if (to.indexOf(prefix) !== 0) return
+		out.push({ at: parseInt(to.slice(prefix.length), 10) || 0, from: String(c.from).replace(/\.id$/, '') })
+	})
+	out.sort(function (a, b) { return a.at - b.at })
+	return out.map(function (o) { return o.from })
 }
 
 // Cavalry's writer drops a fill or stroke fed by a Shader Array (it writes the bare colour,
@@ -127,8 +146,7 @@ export function exportComp(compId, opts) {
 
 	if (fadeAutoAnimate(compId, json)) text = JSON.stringify(json)
 	if (injectVisibilityOpacity(compId, json, frames)) text = JSON.stringify(json)
-	if (injectSubMeshVisibility(compId, json, frames)) text = JSON.stringify(json)
-	if (cullFalloffHidden(compId, json, frames)) text = JSON.stringify(json)
+	if (injectSubMeshVisibility(compId, json, frames, opts && opts.measuredSubMesh)) text = JSON.stringify(json)
 	if (restructureDuplicators(compId, json, frames, opts)) text = JSON.stringify(json)
 	console.log('[restructure] DONE. assets=' + (json.assets ? json.assets.length : 0) + ', layers=' + json.layers.length)
 	return { json: json, text: text, dir: dir, file: file, baked: restore.map(function (r) { return r[0] }) }
@@ -394,35 +412,67 @@ function injectVisibilityOpacity(compId, json, frames) {
 // Per-submesh visibility injection.
 //
 // Cavalry's Lottie writer drops a subMesh's driven shapeVisibility, so every
-// duplicator copy exports as if always visible. Cavalry has no API to READ the
-// evaluated per-index visibility (measured: getBoundingBox, subBoundingBox,
-// countSubMeshes and api.get on driven attrs all ignore it), so this pass
-// instead REPRODUCES the known drivers from the scene graph:
+// duplicator copy exports as if always visible. The same writer drops a driven
+// shapeOpacity, so an oscillator fade exports as a flat 100. Cavalry has no API
+// to READ either evaluated per-index value (measured: getBoundingBox,
+// subBoundingBox, countSubMeshes, extractSubMeshes and api.get on the driven
+// attrs all ignore it), so this pass evaluates what the scene graph defines —
+// a Visibility Sequence, an index-pure JavaScript utility (ctx = {index,
+// count}), an Oscillator on shapeOpacity (closed form) — and takes every other
+// driver (a seeded Random, a Value with falloffs, an oscillator whose
+// timeOffset is driven) from the clone measurement in subMeshMeasure.js.
+// Layer-seeded Randoms are not measured yet; their copies keep their visibility
+// rather than being culled on a guess.
 //
-//   1. a Visibility Sequence connected to shapeVisibility — exact algorithm;
-//   2. a JavaScript utility connected to shapeVisibility — its expression
-//      evaluated per index with ctx = { index, count };
-//   3. value+falloff chains — already handled by cullFalloffHidden;
-//   4. anything else — skipped with a warning (we never guess).
-//
-// Each driver gives a per-frame 0/1 mask over copy indices (truthy → visible,
-// matching the subMesh attribute doc). The mask lands on the matching Lottie
-// shape groups as tr.o opacity keys (0/100), or hd:true when a copy is hidden
-// at every frame — removeHidden strips those.
+// Every driver yields a per-frame 0..100 value series per copy, so a gate and a
+// fade are the same kind of number and combine by MULTIPLICATION — a hidden
+// copy stays at 0 whatever its fade says, and a visible copy at half fade lands
+// at 50. The product lands on the matching Lottie shape groups as a tr.o
+// opacity (hold keys for a gate, a thinned linear curve for a fade), or
+// hd:true when a copy is 0 at every frame — removeHidden strips those.
 // ---------------------------------------------------------------
 
-// One subMesh's per-frame masks: [{ frame, mask }] where mask[index] = 0|1.
-// Returns null when the driver is unknown or unpure — nothing gets injected.
-function subMeshDriverMasks(sm, frames, compId) {
+// Read an oscillator node's analytic config. Returns null when the node is not
+// an oscillator. fps comes from the comp (the oscillator node has no fps
+// attribute; measured), which is the rate its frequency is expressed against.
+export function oscillatorConfig(id, compId) {
+	if (api.getLayerType(id) !== 'oscillator') return null
+	var cfg = {}
+	;['minimum', 'maximum', 'frequency', 'timeMode', 'trigType', 'waveType', 'strength', 'strengthToZero', 'timeOffset', 'timeScale', 'offset'].forEach(function (a) {
+		try { cfg[a] = api.hasAttribute(id, a) ? api.get(id, a) : undefined } catch (e) { cfg[a] = undefined }
+	})
+	cfg.fps = 60
+	try {
+		var comp = compId || api.getActiveComp()
+		if (comp && api.hasAttribute(comp, 'fps')) cfg.fps = api.get(comp, 'fps') || 60
+	} catch (e) {}
+	return cfg
+}
+
+// One driven subMesh attribute as a value source. Returns
+//   { perCopy: copy -> per-frame 0..100 values }  — index-ordered (needs pairing)
+//   { uniform: per-frame 0..100 values }          — same for every copy
+//   { measured: [{ c, v }] in probe bake order }  — paired by baked position
+// or null when the driver cannot be reproduced (copies are then left alone).
+//
+// `attr` is 'shapeVisibility' (a gate: v >= 0.5 shows, measured) or
+// 'shapeOpacity' (hard-clamped to 0..100, measured). Drivers whose per-copy
+// value only Cavalry can compute come from the clone measurement
+// (subMeshMeasure.js), handed in as `measured`.
+function subMeshDriverValues(sm, attr, frames, compId, measured) {
 	var count = subMeshCopyCount(sm, compId)
 	if (!count) return null
-	var conn = (api.getInConnection(sm, 'shapeVisibility') || '').split('.')[0]
+	var conn = (api.getInConnection(sm, attr) || '').split('.')[0]
 	if (!conn) return null
 	var type = api.getLayerType(conn)
+	var isGate = attr === 'shapeVisibility'
+	var hold = function (v) {
+		var row = []
+		for (var k = 0; k < frames.length; k++) row.push(v)
+		return row
+	}
 
-	if (type === 'visibility') {
-		// Visibility Sequence: sample its attrs at every frame, apply the
-		// documented algorithm. alwaysOn/alwaysOff are static strings.
+	if (type === 'visibility' && isGate) {
 		var masks = []
 		for (var i = 0; i < frames.length; i++) {
 			api.setFrame(frames[i].frame)
@@ -440,34 +490,132 @@ function subMeshDriverMasks(sm, frames, compId) {
 				)
 			)
 		}
-		return masks
+		var vis = []
+		for (var c = 0; c < count; c++) {
+			var row = []
+			for (var f = 0; f < frames.length; f++) row.push(masks[f][c] ? 100 : 0)
+			vis.push(row)
+		}
+		return { perCopy: vis }
 	}
 
 	if (type === 'javaScript') {
-		// The utility's expression is evaluated by Cavalry per copy per frame;
-		// ours reproduces it per index. Only pure ctx expressions are safe.
-		var expr = api.get(conn, 'expression')
-		var base = expressionMask(expr, count)
-		if (!base) {
-			console.log('[submesh-vis] subMesh ' + sm + ': javascript driver not index-pure — skipping')
-			return null
+		var base = expressionValues(api.get(conn, 'expression'), count)
+		if (base) {
+			return {
+				perCopy: base.map(function (v) {
+					return hold(isGate ? (gateOf(v) ? 100 : 0) : clampOpacity(Number(v) || 0))
+				}),
+			}
 		}
-		// The expression may read scene attrs through ctx.* extensions beyond
-		// index/count; without them Cavalry's per-frame values are invisible to
-		// us, so a static per-index mask is all we can stand behind.
-		var masks = []
-		for (var j = 0; j < frames.length; j++) masks.push(base)
-		return masks
 	}
 
-	console.log('[submesh-vis] subMesh ' + sm + ': unknown driver type ' + type + ' — skipping')
+	// The measurement is only trusted for the node it was taken from.
+	var m = measured && measured[sm] && measured[sm][attr]
+	if (m && m.node === conn) {
+		if (m.kind === 'value') {
+			return {
+				measured: m.copies.map(function (k) {
+					return { c: k.c, row: hold(isGate ? (gateOf(k.v) ? 100 : 0) : clampOpacity(k.v)) }
+				}),
+			}
+		}
+		// kind 'phase': two samples of the oscillator's own output fix each
+		// copy's phase; the closed form then gives every frame.
+		var pcfg = oscillatorConfig(conn, compId)
+		if (!pcfg || !m.frames || m.frames.length < 2) return null
+		var out = []
+		for (var q = 0; q < m.copies.length; q++) {
+			var k = m.copies[q]
+			// The solver returns the phase at the first sample; shift it back to frame 0.
+			var off = oscillatorPhaseFromSamples(pcfg, k.vs[0], k.vs[1], m.frames[1] - m.frames[0])
+			if (off == null) return null
+			off -= m.frames[0] / (pcfg.fps || 60)
+			var s = oscillatorSeries(Object.assign({}, pcfg, { timeOffset: off }), frames, 0)
+			if (!s) return null
+			out.push({ c: k.c, row: s.map(clampOpacity) })
+		}
+		return { measured: out }
+	}
+
+	if (type === 'oscillator' && !isGate) {
+		var cfg = oscillatorConfig(conn, compId)
+		if (!cfg) return null
+		if ((api.getInConnection(conn, 'timeOffset') || '').split('.')[0]) {
+			console.log('[submesh-vis] ' + sm + ': oscillator timeOffset is driven and was not measured — copies left alone')
+			return null
+		}
+		var series = oscillatorSeries(cfg, frames, 0)
+		if (!series) {
+			console.log('[submesh-vis] ' + sm + ': oscillator config is not analytically evaluable — skipping')
+			return null
+		}
+		return { uniform: series.map(clampOpacity) }
+	}
+
+	if (driverUsesLayerSeed(sm, attr)) {
+		console.log('[submesh-vis] ' + sm + ': ' + attr + ' driver uses "Use Layer as Seed" — copies left visible')
+	} else {
+		console.log('[submesh-vis] ' + sm + ': ' + attr + ' driver (' + type + ') was not measured — copies left visible')
+	}
 	return null
 }
 
-// How many copies a subMesh's host duplicator generates. The subMesh sits in a
-// duplicator's deformers slot; read that host's count (the attribute path moved
-// between Cavalry versions: generator.count, else generator.input.count).
-function subMeshCopyCount(sm, compId) {
+// Walk an attribute's driver chain for a Random/Noise with Use Layer as Seed.
+// The chain must be walked, not sampled one hop: on Quiz BG the flag would sit
+// on random#33, which feeds value#77, which feeds the subMesh.
+export function driverUsesLayerSeed(sm, attr) {
+	var seen = {}
+	var stack = [(api.getInConnection(sm, attr || 'shapeVisibility') || '').split('.')[0]]
+	while (stack.length) {
+		var id = stack.pop()
+		if (!id || seen[id]) continue
+		seen[id] = 1
+		var type = api.getLayerType(id)
+		if (type === 'random' || type === 'noise') {
+			if (api.hasAttribute(id, 'useLayerAsSeed') && api.get(id, 'useLayerAsSeed')) return true
+		}
+		;(api.getInConnectedAttributes(id) || []).forEach(function (a) {
+			var src = (api.getInConnection(id, a) || '').split('.')[0]
+			if (src) stack.push(src)
+		})
+	}
+	return false
+}
+
+// Copy index → comp-space centre (Cavalry coordinates, y up), read from the
+// live duplicator at the first exported frame, because the baked group centres
+// come from each copy's FIRST path keyframe.
+//
+// The index→position relationship is NOT the grid order you might assume, and
+// Sort/Shuffle/Array distributions reorder ids, so it is read, never derived.
+function readCopyCentres(host, count, compId, sampleFrame) {
+	var frame = api.getFrame()
+	var ex = null
+	try {
+		ex = api.create('extractSubMeshes', 'submesh-vis-centres')
+		api.parent(ex, compId)
+		api.set(ex, { ignoreEmptySubMeshes: false, levelMode: 1, level: 1, indices: '0' })
+		api.connect(host, 'id', ex, 'inputShape')
+		if (typeof sampleFrame === 'number') api.setFrame(sampleFrame)
+		var out = []
+		for (var c = 0; c < count; c++) {
+			api.set(ex, { indices: String(c) })
+			var box = api.getBoundingBox(ex, true)
+			out.push(box && box.width ? [box.x + box.width / 2, box.y + box.height / 2] : null)
+		}
+		return out
+	} catch (e) {
+		console.log('[submesh-vis] ' + host + ': could not read copy centres — ' + e.message)
+		return null
+	} finally {
+		if (ex) { try { api.deleteLayer(ex) } catch (e) {} }
+		try { api.setFrame(frame) } catch (e) {}
+	}
+}
+
+// The duplicator whose deformers slot holds this subMesh, or null.
+export function subMeshHost(sm, compId) {
 	var host = null
 	compLayers(compId).forEach(function (id) {
 		if (api.getLayerType(id) !== 'duplicator') return
@@ -475,9 +623,14 @@ function subMeshCopyCount(sm, compId) {
 			if ((api.getInConnection(id, 'deformers.' + i) || '').split('.')[0] === sm) host = id
 		}
 	})
+	return host
+}
+
+// How many copies a subMesh's host duplicator generates (the attribute path
+// moved between Cavalry versions: generator.count, else generator.input.count).
+function subMeshCopyCount(sm, compId) {
+	var host = subMeshHost(sm, compId)
 	if (!host) return 0
-	// Cavalry logs an error for every api.get on a missing attribute, so gate with
-	// hasAttribute first (the attr path moved between Cavalry versions).
 	var count = null
 	if (api.hasAttribute(host, 'generator.count')) count = api.get(host, 'generator.count')
 	if (!count && api.hasAttribute(host, 'generator.input.count')) count = api.get(host, 'generator.input.count')
@@ -486,42 +639,103 @@ function subMeshCopyCount(sm, compId) {
 }
 
 // Inject per-submesh visibility into the Lottie JSON. Returns changes count.
-function injectSubMeshVisibility(compId, json, frames) {
+//
+// Every source is resolved to one 0..100 series per BAKED GROUP, and the
+// sources of all deformers on a host are MULTIPLIED: a copy any gate hides is
+// 0 whatever its fade says. Index-ordered sources are paired by live copy
+// centre (y flipped into Lottie space); measured sources by the probe bake's
+// own copy centres. A group some source cannot place is left alone.
+export function injectSubMeshVisibility(compId, json, frames, measured) {
 	var frame = api.getFrame()
 	var changed = 0
 	try {
+		var byHost = {}
+		var order = []
 		compLayers(compId).forEach(function (id) {
 			if (api.getLayerType(id) !== 'subMesh') return
-			var masks = subMeshDriverMasks(id, frames, compId)
-			if (!masks) return
-			var count = masks[0].length
-			// The exported JSON holds one ty=4 shape layer per duplicated mesh;
-			// its baked copy groups correspond to the subMesh's child indices in
-			// enumeration order. Match by group count (same rule
-			// restructureDuplicators uses), nearest count wins.
+			var host = subMeshHost(id, compId)
+			if (!host) return
+			if (!byHost[host]) {
+				byHost[host] = []
+				order.push(host)
+			}
+			byHost[host].push(id)
+		})
+
+		order.forEach(function (host) {
+			var count = subMeshCopyCount(byHost[host][0], compId)
+			if (!count) return
 			var layer = null
 			var best = null
 			json.layers.forEach(function (L) {
 				if (L.ty !== 4) return
-				var groups = allCopyGroups(L.shapes)
-				if (groups.length < count) return
-				var d = groups.length - count
+				var g = allCopyGroups(L.shapes)
+				if (g.length < count) return
+				var d = g.length - count
 				if (best === null || d < best) {
 					best = d
 					layer = L
 				}
 			})
 			if (!layer) {
-				console.log('[submesh-vis] subMesh ' + id + ': no shape layer with ' + count + '+ copy groups')
+				console.log('[submesh-vis] ' + host + ': no shape layer with ' + count + '+ copy groups')
 				return
 			}
-			var groups = allCopyGroups(layer.shapes).slice(0, count)
-			var byIndex = {}
-			groups.forEach(function (g, gi) {
-				var m = masks.map(function (mask) { return mask[gi] })
-				byIndex[gi] = m
+			var groups = allCopyGroups(layer.shapes)
+			var groupCentres = groups.map(function (g) { return bakedGroupCentre(g) })
+
+			var sources = []
+			byHost[host].forEach(function (id) {
+				;['shapeVisibility', 'shapeOpacity'].forEach(function (attr) {
+					if (!(api.getInConnection(id, attr) || '')) return
+					var s = subMeshDriverValues(id, attr, frames, compId, measured)
+					if (s) sources.push(s)
+				})
 			})
-			changed += applyMasksToGroups(groups, byIndex, frames)
+			if (!sources.length) {
+				console.log('[submesh-vis] ' + host + ': no deformer value is reproducible — copies left visible')
+				return
+			}
+
+			var indexPairs
+			var perGroup = []
+			for (var si = 0; si < sources.length; si++) {
+				var src = sources[si]
+				var rows = new Array(groups.length).fill(null)
+				if (src.uniform) {
+					for (var g0 = 0; g0 < groups.length; g0++) rows[g0] = src.uniform
+				} else if (src.perCopy) {
+					if (indexPairs === undefined) {
+						indexPairs = alignedPairs(readCopyCentres(host, count, compId, frames.length ? frames[0].frame : null), groupCentres, true)
+					}
+					if (!indexPairs) {
+						console.log('[submesh-vis] ' + host + ': could not pair copies to baked groups — skipping')
+						return
+					}
+					indexPairs.forEach(function (gi, ci) { if (gi !== null) rows[gi] = src.perCopy[ci] })
+				} else {
+					var mp = alignedPairs(src.measured.map(function (k) { return k.c }), groupCentres, false)
+					if (!mp) return
+					mp.forEach(function (gi, k) { if (gi !== null) rows[gi] = src.measured[k].row })
+				}
+				perGroup.push(rows)
+			}
+
+			var byGroup = {}
+			for (var gi = 0; gi < groups.length; gi++) {
+				var row = []
+				for (var f2 = 0; f2 < frames.length; f2++) {
+					var v = 100
+					for (var s2 = 0; s2 < perGroup.length; s2++) {
+						var r = perGroup[s2][gi]
+						if (!r) { v = null; break }
+						v = (v * r[f2]) / 100
+					}
+					row.push(v)
+				}
+				byGroup[gi] = row
+			}
+			changed += applyValuesToGroups(groups, byGroup, frames)
 		})
 	} finally {
 		api.setFrame(frame)
@@ -555,98 +769,6 @@ function glyphGroups(items, out) {	out = out || []
 	return out
 }
 
-// Decode a compound-graph attribute into a y(x) sampler over x ∈ [0,1].
-// api.get reads graph attrs as null, so this goes through api.serialise (the save-file
-// representation): graph.list is an array of bezier points, each {position:{x,y},
-// left:{x,y}, right:{x,y}, interpolation} — position is the on-curve point, left/right
-// the handle offsets, all with a {value:...} wrapper. x is clamped to [0,1] outside the
-// point range; y is linear-interpolated between consecutive control points (enough for
-// culling, which only trusts exact-0 values).
-function graphSamplerFromSerialised(graphAttr) {
-	if (!graphAttr || !graphAttr.list || !graphAttr.list.length) return null
-	var pts = graphAttr.list.map(function (entry) {
-		var c = entry && entry.compound
-		if (!c || !c.position || !c.position.value) return null
-		return { x: c.position.value.x, y: c.position.value.y }
-	}).filter(Boolean)
-	if (!pts.length) return null
-	pts.sort(function (a, b) { return a.x - b.x })
-	return function (x) {
-		if (x <= pts[0].x) return pts[0].y
-		if (x >= pts[pts.length - 1].x) return pts[pts.length - 1].y
-		for (var i = 1; i < pts.length; i++) {
-			if (x <= pts[i].x) {
-				var a = pts[i - 1], b = pts[i]
-				var t = (x - a.x) / (b.x - a.x || 1)
-				return a.y + (b.y - a.y) * t
-			}
-		}
-		return pts[pts.length - 1].y
-	}
-}
-
-// The static falloff attached to a node's `falloffs` slot, or null.
-// Only safe when every spatial/time attribute is static; any keyframes or an
-// undecodeable graph make the value unknowable and we return null instead.
-function staticFalloffOf(nodeId, slot, frames) {
-	var conn = (api.getInConnection(nodeId, slot) || '').split('.')[0]
-	if (!conn) return { enabled: true, sampler: null, rect: null } // no falloff → full strength
-	if (api.getLayerType(conn) !== 'falloff') return null
-	var f = conn
-	// Falloff disabled → output 1 everywhere (same as absent). 'on' gates rendering of
-	// the falloff gizmo itself; 'enabled' is the computational switch.
-	if (!api.get(f, 'enabled')) return { enabled: false, sampler: null, rect: null }
-	// Animated anything → bail. Sample the key attributes at every frame; a value that
-	// moves makes the per-copy result time-dependent.
-	var frame = api.getFrame()
-	var dynamic = ['strength', 'size', 'position', 'rotation', 'seed', 'useProbability', 'repetitions', 'enabled'].some(function (attr) {
-		if (!api.hasAttribute(f, attr)) return false
-		var first = null
-		for (var i = 0; i < frames.length; i++) {
-			api.setFrame(frames[i].frame)
-			var v = JSON.stringify(api.get(f, attr))
-			if (first === null) first = v
-			else if (v !== first) return true
-		}
-		return false
-	})
-	api.setFrame(frame)
-	if (dynamic) return null
-	// Decode the graph through serialise (api.get returns null for compound graphs).
-	var ser = api.serialise([f], false)
-	var graphSampler = null
-	try {
-		var parsed = JSON.parse(ser)
-		var fnode = (parsed.nodes || []).filter(function (n) { return n && n.nodeId === f })[0]
-		if (fnode) graphSampler = graphSamplerFromSerialised(fnode.attributes && fnode.attributes.graph)
-	} catch (e) {}
-	// A custom graph we cannot read must block culling: an unknown curve could make
-	// interior values non-zero.
-	if (graphSampler === null) {
-		if (api.isAttrDefault(f, 'graph')) {
-			// Default graph = 1 at centre → 0 at edge (documented). Linear drop: y = 1 - x.
-			graphSampler = function (x) { return 1 - x }
-		} else {
-			return null
-		}
-	}
-	var shapeType = api.get(f, 'shapeType')
-	var size = api.get(f, 'size')
-	var pos = api.get(f, 'position')
-	var rot = api.get(f, 'rotation')
-	// v1 supports the axis-aligned Rectangle falloff (the common grid-hole case).
-	if (shapeType !== 1) return null
-	if (rot && (rot.x || rot.y || rot.z)) return null
-	if (!size || !size.x || !size.y) return null
-	// Empirically verified (render diff against Cavalry): the hidden zone reaches
-	// |x| = size.x, |y| = size.y — size is the HALF-extent, not full width/height.
-	return {
-		enabled: true,
-		sampler: graphSampler,
-		rect: { cx: pos ? pos.x : 0, cy: pos ? pos.y : 0, hw: size.x, hh: size.y },
-	}
-}
-
 // Centroid(s) of a copy group's baked path. Static paths give one point; animated paths
 // give one per keyframe (Lottie path keyframes hold their sub-path in `s[0].v`). Returns
 // null when the path data is missing or malformed — the caller then leaves the group alone.
@@ -665,154 +787,21 @@ function groupCentroids(sh) {
 	return out
 }
 
-// Value of the falloff at a point in comp space. The doc: the Falloff Graph is sampled
-// from centre (x=0) to outside (x=1); for a Rectangle the sample coordinate is the
-// max-normalised axis distance (Chebyshev), matching the linear edge case measured
-// empirically. Returns the graph value; 0 means the attached behaviour outputs nothing.
-function falloffValueAt(fo, x, y) {
-	var nx = Math.abs(x - fo.rect.cx) / fo.rect.hw
-	var ny = Math.abs(y - fo.rect.cy) / fo.rect.hh
-	var n = Math.max(Math.min(nx, 1), Math.min(ny, 1))
-	return fo.sampler(n)
-}
-
-// Cavalry's writer drops a subMesh's animated shapeVisibility (per-copy mesh hiding),
-// so a falloff carving a hole out of a duplicator grid exports as if every copy were
-// visible — huge dead weight. Read the chain: subMesh.shapeVisibility ← value ← falloffs.
-// When the falloff is static (the common "always-off hole" rig), evaluate its graph at
-// each copy group's baked centre and mark always-zero copies `hd` — removeHidden strips
-// them later. Copies with any non-zero value are left untouched: the exact visibility
-// threshold is Cavalry-internal, so only exact-0 (provably never drawn) gets culled.
-// Returns changes count.
-function cullFalloffHidden(compId, json, frames) {
-	var frame = api.getFrame()
-	var changed = 0
-	try {
-		// 1. subMesh nodes driving a shapeVisibility or shapeOpacity from a value node
-		// with a falloff. Both attributes hide copies: visibility gates drawing, opacity
-		// scales it — a static falloff that evaluates to exactly 0 proves the copy is
-		// never drawn either way.
-		var sceneLayers = compLayers(compId)
-		var hiddenZones = [] // [{ cx, cy, hw, hh, sampler }] — comp-space visibility holes
-		sceneLayers.forEach(function (id) {
-			if (api.getLayerType(id) !== 'subMesh') return
-			var src = (api.getInConnection(id, 'shapeVisibility') || api.getInConnection(id, 'shapeOpacity') || '').split('.')[0]
-			if (!src) return
-			// The gate must be a static value node: keyframed gates need per-frame baking
-			// (injectVisibilityOpacity territory), not culling.
-			if (api.getLayerType(src) !== 'value') return
-			if (!api.hasAttribute(src, 'falloffs')) return
-			var value = api.get(src, 'value')
-			// Full-strength base only: 1 on the 0..1 scale or 100 on the percent scale
-			// (shapeOpacity chains read percent). Other bases scale the output in ways
-			// the cull's exact-0 rule still holds for — but stay conservative.
-			if (value !== 1 && value !== 100) return
-			// every falloff in the slot attenuates multiplicatively (doc: multiplies Strength)
-			var falloffs = []
-			for (var i = 0; api.hasAttribute(src, 'falloffs.' + i + '.id'); i++) {
-				var fo = staticFalloffOf(src, 'falloffs.' + i + '.id', frames)
-				if (!fo || !fo.enabled) return // unknown falloff or disabled evaluation → skip this subMesh entirely
-				if (fo.rect) falloffs.push(fo)
-			}
-			if (!falloffs.length) return
-			// With N falloffs the output = base × ∏ graph_i(x). A copy is cullable when
-			// that product is exactly 0 at its position for every frame.
-			hiddenZones.push({ falloffs: falloffs, subMesh: id })
-		})
-		if (!hiddenZones.length) return 0
-
-		// 2. Cull: a subMesh's shapeVisibility hides copies of ONE mesh, and the exported
-		// JSON has one ty=4 layer per mesh. Any shape layer with enough groups to be a
-		// duplicated mesh gets its per-copy check: groups whose centre evaluates to an
-		// exact 0 through every falloff in every zone are provably never drawn.
-		// (The centre is the baked path centroid — Cavalry bakes copies at absolute comp
-		// positions, the same space the falloff's position lives in.)
-		json.layers.forEach(function (layer) {
-			if (layer.ty !== 4) return
-			var groups = []
-			;(function walk(items) {
-				(items || []).forEach(function (g) {
-					if (g.ty === 'gr') { groups.push(g); walk(g.it) }
-				})
-			})(layer.shapes)
-			if (groups.length < 4) return
-			groups.forEach(function (g) {
-				if (g.hd) return
-				var sh = null
-				for (var i = 0; i < (g.it || []).length; i++) if (g.it[i].ty === 'sh') { sh = g.it[i]; break }
-				// Animated paths (sh.ks.a===1) are allowed: the copy is cullable only when
-				// EVERY keyframe centroid sits in the exact-0 hole — a moving copy that
-				// ever leaves the hole stays visible. Static-only was too strict: this
-				// rig bakes copy positions into 2-keyframe paths with identical centroids.
-				var cents = groupCentroids(sh)
-				if (!cents) return
-				var hidden = false
-				for (var ci = 0; ci < cents.length; ci++) {
-					var cx = cents[ci][0], cy = cents[ci][1]
-					var zero = true
-					hiddenZones.forEach(function (zone) {
-						var product = 1
-						zone.falloffs.forEach(function (fo) { product *= falloffValueAt(fo, cx, cy) })
-						if (product !== 0) zero = false
-					})
-					if (!zero) return
-					hidden = true
-				}
-				if (hidden) { g.hd = true; changed++ }
-			})
-		})
-
-		// 2b. Ref layers (ty=0) carry copies too — the writer demotes duplicator copies
-		// to precomp refs (restructureDuplicators) or exports duplicated meshes as refs
-		// directly, and the same falloff hole applies. A ref's on-screen position is its
-		// ks.p translation plus the referenced asset's internal anchor offset (the asset's
-		// inner layer draws at its own ks.p inside the asset's coordinate box). Both must
-		// be static for the test to mean anything. A ref landing at an exact-0 in every
-		// zone is provably never drawn → drop the layer outright.
-		json.layers = json.layers.filter(function (L) {
-			if (L.ty !== 0 || !L.refId) return true
-			if (L.parent != null) return true
-			var p = L.ks && L.ks.p
-			if (!p || p.a === 1 || p.x) return true
-			var pk = asArrayK(p.k)
-			if (pk.length < 2) return true
-			var anchor = refAnchor(json, L.refId)
-			if (!anchor) return true
-			var cx = pk[0] + anchor.x
-			var cy = pk[1] + anchor.y
-			for (var z = 0; z < hiddenZones.length; z++) {
-				var product = 1
-				for (var i = 0; i < hiddenZones[z].falloffs.length; i++) product *= falloffValueAt(hiddenZones[z].falloffs[i], cx, cy)
-				if (product === 0) { changed++; return false }
-			}
-			return true
-		})
-	} finally {
-		api.setFrame(frame)
+// Comp-space centre of one baked copy group, used to pair it with the copy
+// index it came from. The writer bakes each copy's path already offset into the
+// duplicator's space, so the path vertex centroid IS the copy position; the
+// group's own tr.p is absent (transform lives in the path). Returns null when
+// the group holds no path to measure.
+function bakedGroupCentre(g) {
+	var it = (g && g.it) || []
+	for (var i = 0; i < it.length; i++) {
+		if (it[i].ty !== 'sh') continue
+		var cents = groupCentroids(it[i])
+		// Later keyframes exist for animated copies; the static first frame is
+		// enough to identify which copy this group is.
+		if (cents && cents.length) return cents[0]
 	}
-	return changed
-}
-
-// ks.p key payload as a plain array (unwrapScalars may have collapsed it to a number).
-function asArrayK(k) {
-	if (Array.isArray(k)) return k
-	if (typeof k === 'number') return [k, 0, 0]
-	return []
-}
-
-// The comp-space offset a ref's translation needs to land its content at the right
-// spot: the referenced asset's inner layer draws at its own ks.p inside the asset's
-// coordinate box. Static inner position only; anything animated makes the offset
-// unknown → null (skip cull for that ref).
-function refAnchor(json, refId) {
-	var a = (json.assets || []).filter(function (x) { return x.id === refId })[0]
-	if (!a || !a.layers || a.layers.length !== 1) return null
-	var il = a.layers[0]
-	var p = il.ks && il.ks.p
-	if (!p || p.a === 1 || p.x) return null
-	var k = asArrayK(p.k)
-	if (k.length < 2) return null
-	return { x: k[0], y: k[1] }
+	return null
 }
 
 // ---------------------------------------------------------------
@@ -860,11 +849,9 @@ function restructureDuplicators(compId, json, frames, opts) {
 		duplicators.forEach(function (dupId) {
 			// a duplicator whose input is a composition reference is handled by the
 			// precomp pass (duplicatorCompRefs) — the bake has no fills worth keeping
-			for (var s = 0; s < 4; s++) {
-				var srcConn = null
-				try { srcConn = api.getInConnection(dupId, 'shapes.' + s) } catch (e) { break }
-				if (!srcConn) break
-				if (api.getLayerType(String(srcConn).replace(/\.id$/, '')) === 'compositionReference') {
+			var shapeSources = inputSources(dupId)
+			for (var s = 0; s < shapeSources.length; s++) {
+				if (api.getLayerType(shapeSources[s]) === 'compositionReference') {
 					console.log('[restructure] duplicator ' + dupId + ' feeds on a composition reference — left to the precomp pass')
 					return
 				}

@@ -7,7 +7,15 @@
 
 // ---------- walking ----------
 
-import { fitEase, fitMotionPath, easeAt, LINEAR, simplifyPath, simplifyPathSet } from './fit.js'
+import {
+	fitEase,
+	fitMotionPath,
+	easeAt,
+	LINEAR,
+	simplifyPath,
+	simplifyPathSet,
+} from './fit.js'
+import { restructureSharedAnim as shareDuplicatorAnimation } from './duplicatorSharedAnim.js'
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 
@@ -35,7 +43,8 @@ export function forEachProp(node, fn, key, owner) {
 export function layerLists(json) {
 	const lists = []
 	if (Array.isArray(json.layers)) lists.push(json.layers)
-	for (const a of json.assets || []) if (Array.isArray(a.layers)) lists.push(a.layers)
+	for (const a of json.assets || [])
+		if (Array.isArray(a.layers)) lists.push(a.layers)
 	return lists
 }
 
@@ -58,7 +67,8 @@ const EPS = 1e-9
 
 function deepEqual(a, b) {
 	if (a === b) return true
-	if (typeof a === 'number' && typeof b === 'number') return Math.abs(a - b) < EPS
+	if (typeof a === 'number' && typeof b === 'number')
+		return Math.abs(a - b) < EPS
 	if (Array.isArray(a) && Array.isArray(b))
 		return a.length === b.length && a.every((v, i) => deepEqual(v, b[i]))
 	if (isObj(a) && isObj(b)) {
@@ -80,8 +90,10 @@ function isLinearSegment(kf, dims) {
 	if (kf.h === 1) return false
 	if (!kf.o || !kf.i) return true // last-key style / missing tangents read as linear
 	for (let d = 0; d < dims; d++) {
-		if (Math.abs(component(kf.o.x, d) - component(kf.o.y, d)) > EPS) return false
-		if (Math.abs(component(kf.i.x, d) - component(kf.i.y, d)) > EPS) return false
+		if (Math.abs(component(kf.o.x, d) - component(kf.o.y, d)) > EPS)
+			return false
+		if (Math.abs(component(kf.i.x, d) - component(kf.i.y, d)) > EPS)
+			return false
 	}
 	return true
 }
@@ -100,7 +112,8 @@ export function collapseStatic(json) {
 		const first = p.k[0].s
 		// text documents (s is an object) stay keyframed; a spatial curve can leave and return
 		if (first === undefined || isObj(first) || p.k.some(hasSpatial)) return
-		if (!p.k.every((kf) => kf.s === undefined || deepEqual(kf.s, first))) return
+		if (!p.k.every((kf) => kf.s === undefined || deepEqual(kf.s, first)))
+			return
 		// Shape keyframes wrap the path in a one-element array.
 		p.k = Array.isArray(first) && first.length === 1 ? first[0] : first
 		p.a = 0
@@ -121,7 +134,11 @@ export function removeRedundantKeys(json) {
 			const prev = keep[keep.length - 1]
 			const cur = k[j]
 			const next = k[j + 1]
-			if (cur.s === undefined || prev.s === undefined || next.s === undefined) {
+			if (
+				cur.s === undefined ||
+				prev.s === undefined ||
+				next.s === undefined
+			) {
 				keep.push(cur)
 				continue
 			}
@@ -146,10 +163,12 @@ function onLine(prev, cur, next) {
 	const a = prev.s,
 		b = cur.s,
 		c = next.s
-	if (!Array.isArray(a) || !a.every((v) => typeof v === 'number')) return false
+	if (!Array.isArray(a) || !a.every((v) => typeof v === 'number'))
+		return false
 	if (b.length !== a.length || c.length !== a.length) return false
 	if (hasSpatial(prev) || hasSpatial(cur)) return false
-	if (!isLinearSegment(prev, a.length) || !isLinearSegment(cur, a.length)) return false
+	if (!isLinearSegment(prev, a.length) || !isLinearSegment(cur, a.length))
+		return false
 	const span = next.t - prev.t
 	if (span <= 0) return false
 	const u = (cur.t - prev.t) / span
@@ -163,13 +182,27 @@ function valueAt(p, t) {
 	const v = (kf) => Number(asArray(kf.s !== undefined ? kf.s : kf.e)[0])
 	if (t <= k[0].t) return v(k[0])
 	for (let j = 0; j < k.length - 1; j++) {
-		const a = k[j], b = k[j + 1]
+		const a = k[j],
+			b = k[j + 1]
 		if (t >= b.t) continue
-		const A = v(a), B = b.s !== undefined ? v(b) : Number(asArray(a.e)[0])
+		const A = v(a),
+			B = b.s !== undefined ? v(b) : Number(asArray(a.e)[0])
 		if (a.h === 1) return A
 		const u = (t - a.t) / (b.t - a.t)
 		if (!a.o || !a.i) return A + (B - A) * u
-		return A + (B - A) * easeAt({ x1: component(a.o.x, 0), y1: component(a.o.y, 0), x2: component(a.i.x, 0), y2: component(a.i.y, 0) }, u)
+		return (
+			A +
+			(B - A) *
+				easeAt(
+					{
+						x1: component(a.o.x, 0),
+						y1: component(a.o.y, 0),
+						x2: component(a.i.x, 0),
+						y2: component(a.i.y, 0),
+					},
+					u
+				)
+		)
 	}
 	return v(k[k.length - 1])
 }
@@ -181,16 +214,24 @@ function valueAt(p, t) {
 // intervals if precomps shown in far-apart pieces matter.
 function visibleWindows(json) {
 	const root = json.layers || []
-	const lists = new Map((json.assets || []).filter((a) => Array.isArray(a.layers)).map((a) => [a.id, a.layers]))
+	const lists = new Map(
+		(json.assets || [])
+			.filter((a) => Array.isArray(a.layers))
+			.map((a) => [a.id, a.layers])
+	)
 	const fr = json.fr || 30
-	const top = [json.ip != null ? json.ip : -Infinity, json.op != null ? json.op : Infinity]
+	const top = [
+		json.ip != null ? json.ip : -Infinity,
+		json.op != null ? json.op : Infinity,
+	]
 	let win = new Map([[root, top]])
 	for (let pass = 0; pass < 16; pass++) {
 		const next = new Map([[root, top]])
 		for (const [list, w] of win)
 			for (const L of list) {
 				if (L.ty !== 0 || !lists.has(L.refId)) continue
-				const a = Math.max(L.ip != null ? L.ip : -Infinity, w[0]), b = Math.min(L.op != null ? L.op : Infinity, w[1])
+				const a = Math.max(L.ip != null ? L.ip : -Infinity, w[0]),
+					b = Math.min(L.op != null ? L.op : Infinity, w[1])
 				if (!(b > a) || !isFinite(a) || !isFinite(b)) continue
 				let lo, hi
 				if (L.tm) {
@@ -198,7 +239,9 @@ function visibleWindows(json) {
 					hi = -Infinity
 					const times = []
 					for (let t = a; t <= b; t += 0.5) times.push(t)
-					if (isAnimated(L.tm)) for (const kf of L.tm.k) if (kf.t >= a && kf.t <= b) times.push(kf.t)
+					if (isAnimated(L.tm))
+						for (const kf of L.tm.k)
+							if (kf.t >= a && kf.t <= b) times.push(kf.t)
 					for (const t of times) {
 						const f = valueAt(L.tm, t) * fr
 						lo = Math.min(lo, f)
@@ -206,14 +249,28 @@ function visibleWindows(json) {
 					}
 					hi += 1 // a remapped frame is shown for the frame after it too
 				} else {
-					const st = L.st || 0, sr = L.sr || 1
+					const st = L.st || 0,
+						sr = L.sr || 1
 					lo = (a - st) / sr
 					hi = (b - st) / sr
 				}
-				const inner = lists.get(L.refId), had = next.get(inner)
-				next.set(inner, had ? [Math.min(had[0], lo), Math.max(had[1], hi)] : [lo, hi])
+				const inner = lists.get(L.refId),
+					had = next.get(inner)
+				next.set(
+					inner,
+					had
+						? [Math.min(had[0], lo), Math.max(had[1], hi)]
+						: [lo, hi]
+				)
 			}
-		const same = next.size === win.size && [...next].every(([l, w]) => win.has(l) && win.get(l)[0] === w[0] && win.get(l)[1] === w[1])
+		const same =
+			next.size === win.size &&
+			[...next].every(
+				([l, w]) =>
+					win.has(l) &&
+					win.get(l)[0] === w[0] &&
+					win.get(l)[1] === w[1]
+			)
 		win = next
 		if (same) break
 	}
@@ -225,7 +282,8 @@ function visibleWindows(json) {
 function visibleSpans(layers, w) {
 	const span = new Map()
 	for (const L of layers) {
-		const from = Math.max(L.ip != null ? L.ip : -Infinity, w[0]), to = Math.min(L.op != null ? L.op : Infinity, w[1])
+		const from = Math.max(L.ip != null ? L.ip : -Infinity, w[0]),
+			to = Math.min(L.op != null ? L.op : Infinity, w[1])
 		span.set(L, to > from ? [from, to] : null)
 	}
 	const byInd = new Map(layers.map((L) => [L.ind, L]))
@@ -237,7 +295,8 @@ function visibleSpans(layers, w) {
 			if (!P || !c) continue
 			const p = span.get(P)
 			const u = p ? [Math.min(p[0], c[0]), Math.max(p[1], c[1])] : c
-			if (!p || u[0] !== p[0] || u[1] !== p[1]) (span.set(P, u), (changed = true))
+			if (!p || u[0] !== p[0] || u[1] !== p[1])
+				(span.set(P, u), (changed = true))
 		}
 	}
 	return span
@@ -270,7 +329,11 @@ export function trimToLayerRange(json) {
 				p.k = k.slice(lo, hi + 1)
 				// one key left means one value for the whole visible range; players treat a
 				// single-key animated property inconsistently, so store it as static
-				if (p.k.length === 1 && p.k[0].s !== undefined && !isObj(p.k[0].s)) {
+				if (
+					p.k.length === 1 &&
+					p.k[0].s !== undefined &&
+					!isObj(p.k[0].s)
+				) {
 					const v = p.k[0].s
 					p.k = Array.isArray(v) && v.length === 1 ? v[0] : v
 					p.a = 0
@@ -292,7 +355,8 @@ function referencedIndices(layers) {
 	layers.forEach((L, i) => {
 		if (L.parent != null) keep.add(L.parent)
 		if (L.tp != null) keep.add(L.tp)
-		if (L.tt && i > 0 && layers[i - 1].ind != null) keep.add(layers[i - 1].ind) // matte above
+		if (L.tt && i > 0 && layers[i - 1].ind != null)
+			keep.add(layers[i - 1].ind) // matte above
 	})
 	return keep
 }
@@ -318,7 +382,9 @@ export function healBrokenRefs(json) {
 			// Bare top-level p/s/r/o/a beside an empty ks: move them into ks.
 			if (L.ty !== 0 || L.refId == null) continue
 			const ks = L.ks || {}
-			const bare = ['p', 's', 'r', 'o', 'a'].filter((k) => L[k] != null && !ks[k])
+			const bare = ['p', 's', 'r', 'o', 'a'].filter(
+				(k) => L[k] != null && !ks[k]
+			)
 			if (!bare.length) continue
 			for (const k of bare) ks[k] = L[k]
 			delete L.p
@@ -367,11 +433,20 @@ export function removeDeadLayers(json) {
 			const L = layers[i]
 			if (L.td || keep.has(L.ind)) continue
 			const o = L.ks && L.ks.o
-			const invisible = o && !isAnimated(o) && !o.x && Number(asArray(o.k)[0]) === 0
+			const invisible =
+				o && !isAnimated(o) && !o.x && Number(asArray(o.k)[0]) === 0
 			// never inside the frames its comp is shown at (a precomp's reached inner frames)
-			const from = Math.max(L.ip != null ? L.ip : -Infinity, w ? w[0] : -Infinity)
-			const to = Math.min(L.op != null ? L.op : Infinity, w ? w[1] : Infinity)
-			const empty = (L.ip != null && L.op != null && L.op <= L.ip) || (w && !(to > from))
+			const from = Math.max(
+				L.ip != null ? L.ip : -Infinity,
+				w ? w[0] : -Infinity
+			)
+			const to = Math.min(
+				L.op != null ? L.op : Infinity,
+				w ? w[1] : Infinity
+			)
+			const empty =
+				(L.ip != null && L.op != null && L.op <= L.ip) ||
+				(w && !(to > from))
 			if (invisible || empty) {
 				layers.splice(i, 1)
 				n++
@@ -393,8 +468,15 @@ const isAllZeroOpacity = (o) => {
 		if (!keys.length) return false
 		return keys.every((kf) => {
 			const s = asArray(kf.s)
-			const e = asArray(kf.e != null ? kf.e : (keys[keys.length - 1] && keys[keys.length - 1].s))
-			return s.every((v) => Number(v) === 0) && e.every((v) => Number(v) === 0)
+			const e = asArray(
+				kf.e != null
+					? kf.e
+					: keys[keys.length - 1] && keys[keys.length - 1].s
+			)
+			return (
+				s.every((v) => Number(v) === 0) &&
+				e.every((v) => Number(v) === 0)
+			)
 		})
 	}
 	return asArray(o.k).every((v) => Number(v) === 0)
@@ -466,7 +548,8 @@ export function dedupeAssets(json) {
 	// Remapping can make two precomps identical in turn; one round is enough in practice.
 	// ponytail: single round; loop until stable if nested duplicate precomps show up.
 	for (const layers of layerLists(json))
-		for (const L of layers) if (remap.has(L.refId)) L.refId = remap.get(L.refId)
+		for (const L of layers)
+			if (remap.has(L.refId)) L.refId = remap.get(L.refId)
 	json.assets = json.assets.filter((a) => !remap.has(a.id))
 	return remap.size
 }
@@ -502,7 +585,14 @@ export function decomposeSharedPaints(json) {
 
 		// One representative keeps the asset slot; the rest become aliases. Prefer a
 		// member whose blink is already static full (cheapest to normalise) else the first.
-		const rep = members.find((m) => m.fl.o && m.fl.o.a === 0 && (m.fl.o.k === 100 || (Array.isArray(m.fl.o.k) && m.fl.o.k[0] === 100))) || members[0]
+		const rep =
+			members.find(
+				(m) =>
+					m.fl.o &&
+					m.fl.o.a === 0 &&
+					(m.fl.o.k === 100 ||
+						(Array.isArray(m.fl.o.k) && m.fl.o.k[0] === 100))
+			) || members[0]
 		// Members whose blink equals the representative's keep working with no ref
 		// change; they are the ones that make dedupe impossible today but decomposition
 		// pointless for them — leave assets whose blink matches rep's byte-for-byte.
@@ -527,7 +617,10 @@ export function decomposeSharedPaints(json) {
 			if (m === rep) continue
 			if (JSON.stringify(m.fl.o) === repOSig) continue // identical twin: plain dedupe, pure gain
 			const refs = refTargets.get(m.a.id) || []
-			if (!refs.length) { gain += JSON.stringify(m.il).length; continue }
+			if (!refs.length) {
+				gain += JSON.stringify(m.il).length
+				continue
+			}
 			gain += JSON.stringify(m.il).length
 			cost += JSON.stringify(m.fl.o).length * refs.length
 		}
@@ -545,12 +638,17 @@ export function decomposeSharedPaints(json) {
 			const refs = refTargets.get(m.a.id) || []
 			// A member whose blink equalled rep's original blink: retarget refs with
 			// no ref-opacity change (they saw repOwnBlink before and after).
-			const sameAsRep = JSON.stringify(m.fl.o) === JSON.stringify(repOwnBlink)
+			const sameAsRep =
+				JSON.stringify(m.fl.o) === JSON.stringify(repOwnBlink)
 			let unmoved = false
 			for (const L of refs) {
 				L.ks = L.ks || {}
 				const cur = L.ks.o
-				const curIsFull = !cur || (cur.a === 0 && (cur.k === 100 || (Array.isArray(cur.k) && cur.k[0] === 100)))
+				const curIsFull =
+					!cur ||
+					(cur.a === 0 &&
+						(cur.k === 100 ||
+							(Array.isArray(cur.k) && cur.k[0] === 100)))
 				if (sameAsRep || curIsFull) {
 					// Retarget first, then carry the blink. sameAsRep refs keep no extra
 					// opacity — they inherit repOwnBlink via the push-down below; others
@@ -574,7 +672,16 @@ export function decomposeSharedPaints(json) {
 		// now static full → push the blink onto refs that don't carry one.
 		if (JSON.stringify(repOwnBlink) !== JSON.stringify({ a: 0, k: 100 })) {
 			for (const L of json.layers) {
-				if (L.ty === 0 && L.refId === rep.a.id && (!L.ks || !L.ks.o || (L.ks.o.a === 0 && (L.ks.o.k === 100 || (Array.isArray(L.ks.o.k) && L.ks.o.k[0] === 100))))) {
+				if (
+					L.ty === 0 &&
+					L.refId === rep.a.id &&
+					(!L.ks ||
+						!L.ks.o ||
+						(L.ks.o.a === 0 &&
+							(L.ks.o.k === 100 ||
+								(Array.isArray(L.ks.o.k) &&
+									L.ks.o.k[0] === 100))))
+				) {
 					L.ks = L.ks || {}
 					L.ks.o = JSON.parse(JSON.stringify(repOwnBlink))
 				}
@@ -589,7 +696,11 @@ export function unwrapScalars(json) {
 	let n = 0
 	forEachProp(json, (p) => {
 		if (isAnimated(p)) return
-		if (Array.isArray(p.k) && p.k.length === 1 && typeof p.k[0] === 'number') {
+		if (
+			Array.isArray(p.k) &&
+			p.k.length === 1 &&
+			typeof p.k[0] === 'number'
+		) {
 			p.k = p.k[0]
 			n++
 		}
@@ -607,7 +718,8 @@ export function trimKeyframeFields(json) {
 		k.forEach((kf, j) => {
 			const last = j === k.length - 1
 			if (kf.h === 1 || last) {
-				for (const f of ['i', 'o', 'to', 'ti']) if (f in kf) (delete kf[f], n++)
+				for (const f of ['i', 'o', 'to', 'ti'])
+					if (f in kf) (delete kf[f], n++)
 			}
 			if ('e' in kf && (!last ? k[j + 1].s !== undefined : true)) {
 				delete kf.e
@@ -616,10 +728,14 @@ export function trimKeyframeFields(json) {
 			if (last && kf.h === 1) (delete kf.h, n++)
 			// a linear segment written with the shortest tangents (0 and 1), same shape kept
 			if (!last && kf.i && kf.o && isLinearSegment(kf, 4)) {
-				const to = (v, n01) => (Array.isArray(v) ? v.map(() => n01) : n01)
+				const to = (v, n01) =>
+					Array.isArray(v) ? v.map(() => n01) : n01
 				const o = { x: to(kf.o.x, 0), y: to(kf.o.y, 0) },
 					i = { x: to(kf.i.x, 1), y: to(kf.i.y, 1) }
-				if (JSON.stringify(o) !== JSON.stringify(kf.o) || JSON.stringify(i) !== JSON.stringify(kf.i)) {
+				if (
+					JSON.stringify(o) !== JSON.stringify(kf.o) ||
+					JSON.stringify(i) !== JSON.stringify(kf.i)
+				) {
 					kf.o = o
 					kf.i = i
 					n++
@@ -637,10 +753,18 @@ export function trimKeyframeFields(json) {
 // canvas renderer reads it without a fallback.
 function dropDefaultTransform(t, keepOpacity) {
 	let n = 0
-	const is = (p, d) => p && !isAnimated(p) && !p.x && asArray(p.k).every((v, i) => Math.abs(v - (d[i] != null ? d[i] : d[d.length - 1])) < EPS)
+	const is = (p, d) =>
+		p &&
+		!isAnimated(p) &&
+		!p.x &&
+		asArray(p.k).every(
+			(v, i) =>
+				Math.abs(v - (d[i] != null ? d[i] : d[d.length - 1])) < EPS
+		)
 	const drop = (k, d) => is(t[k], d) && (delete t[k], n++)
 	if (t.p && t.p.s) {
-		if (is(t.p.x, [0]) && is(t.p.y, [0]) && (!t.p.z || is(t.p.z, [0]))) (delete t.p, n++)
+		if (is(t.p.x, [0]) && is(t.p.y, [0]) && (!t.p.z || is(t.p.z, [0])))
+			(delete t.p, n++)
 	} else drop('p', [0])
 	drop('a', [0])
 	drop('s', [100])
@@ -651,12 +775,14 @@ function dropDefaultTransform(t, keepOpacity) {
 
 export function removeDefaults(json) {
 	let n = 0
-	const zero = (p) => p && !isAnimated(p) && !p.x && Number(asArray(p.k)[0]) === 0
+	const zero = (p) =>
+		p && !isAnimated(p) && !p.x && Number(asArray(p.k)[0]) === 0
 	const walk = (node) => {
 		if (Array.isArray(node)) return node.forEach(walk)
 		if (!isObj(node)) return
 		if (node.ty === 'tr') n += dropDefaultTransform(node, true)
-		else if (typeof node.ty === 'number' && isObj(node.ks)) n += dropDefaultTransform(node.ks, false)
+		else if (typeof node.ty === 'number' && isObj(node.ks))
+			n += dropDefaultTransform(node.ks, false)
 		if (zero(node.sk) && (!node.sa || zero(node.sa))) {
 			delete node.sk
 			delete node.sa
@@ -668,16 +794,20 @@ export function removeDefaults(json) {
 	}
 	walk(json.layers)
 	for (const a of json.assets || []) walk(a.layers)
-	if (Array.isArray(json.chars) && !json.chars.length) (delete json.chars, n++)
+	if (Array.isArray(json.chars) && !json.chars.length)
+		(delete json.chars, n++)
 	return n
 }
 
 const isIdentity = (ks) => {
 	if (!ks) return true
-	const val = (p, d) => (p ? (!isAnimated(p) && !p.x ? asArray(p.k) : null) : asArray(d))
-	const same = (v, ref) => v && ref.every((r, i) => Math.abs((v[i] != null ? v[i] : r) - r) < EPS)
+	const val = (p, d) =>
+		p ? (!isAnimated(p) && !p.x ? asArray(p.k) : null) : asArray(d)
+	const same = (v, ref) =>
+		v && ref.every((r, i) => Math.abs((v[i] != null ? v[i] : r) - r) < EPS)
 	let pos
-	if (ks.p && ks.p.s) pos = [val(ks.p.x, 0), val(ks.p.y, 0)].every((v) => same(v, [0]))
+	if (ks.p && ks.p.s)
+		pos = [val(ks.p.x, 0), val(ks.p.y, 0)].every((v) => same(v, [0]))
 	else pos = same(val(ks.p, [0, 0, 0]), [0, 0, 0])
 	return (
 		pos &&
@@ -685,7 +815,10 @@ const isIdentity = (ks) => {
 		same(val(ks.s, [100, 100, 100]), [100, 100, 100]) &&
 		same(val(ks.r, [0]), [0]) &&
 		same(val(ks.sk, [0]), [0]) &&
-		!ks.rx && !ks.ry && !ks.rz && !ks.or
+		!ks.rx &&
+		!ks.ry &&
+		!ks.rz &&
+		!ks.or
 	)
 }
 
@@ -713,13 +846,25 @@ export function removeIdentityNulls(json) {
 }
 
 // A layer that draws something (shape geometry, precomp, solid, image, text).
-const drawsSomething = (L) => L.ty !== 4 ? L.ty !== 3 : /"ty":"(sh|rc|el|sr)"/.test(JSON.stringify(L.shapes || []))
+const drawsSomething = (L) =>
+	L.ty !== 4
+		? L.ty !== 3
+		: /"ty":"(sh|rc|el|sr)"/.test(JSON.stringify(L.shapes || []))
 
 // Apply fn to a property's value(s): the static value, or every key's s/e.
 function mapValues(p, fn) {
 	if (!p) return p
 	if (!isAnimated(p)) return Object.assign({}, p, { k: fn(asArray(p.k)) })
-	return Object.assign({}, p, { k: p.k.map((kf) => Object.assign({}, kf, kf.s ? { s: fn(kf.s) } : {}, kf.e ? { e: fn(kf.e) } : {})) })
+	return Object.assign({}, p, {
+		k: p.k.map((kf) =>
+			Object.assign(
+				{},
+				kf,
+				kf.s ? { s: fn(kf.s) } : {},
+				kf.e ? { e: fn(kf.e) } : {}
+			)
+		),
+	})
 }
 const staticOf = (p, d) => (p && !isAnimated(p) ? asArray(p.k) : p ? null : d)
 
@@ -735,28 +880,76 @@ export function foldStaticParents(json) {
 			changed = false
 			for (let i = layers.length - 1; i >= 0; i--) {
 				const P = layers[i]
-				if (P.ind == null || drawsSomething(P) || P.td || P.tt || P.ddd === 1 || layers.some((o) => o.tp === P.ind)) continue
+				if (
+					P.ind == null ||
+					drawsSomething(P) ||
+					P.td ||
+					P.tt ||
+					P.ddd === 1 ||
+					layers.some((o) => o.tp === P.ind)
+				)
+					continue
 				const ks = P.ks || {}
 				if (JSON.stringify(ks).indexOf('"x":"') >= 0) continue // expressions
-				const pp = ks.p && ks.p.s ? [staticOf(ks.p.x, [0]), staticOf(ks.p.y, [0])] : [staticOf(ks.p, [0, 0])]
+				const pp =
+					ks.p && ks.p.s
+						? [staticOf(ks.p.x, [0]), staticOf(ks.p.y, [0])]
+						: [staticOf(ks.p, [0, 0])]
 				if (pp.some((v) => !v)) continue
 				const pos = ks.p && ks.p.s ? [pp[0][0], pp[1][0]] : pp[0]
-				const a = staticOf(ks.a, [0, 0]), sc = staticOf(ks.s, [100, 100]), rr = staticOf(ks.r, [0]), sk = staticOf(ks.sk, [0])
-				if (!a || !sc || !rr || !sk || Math.abs(sk[0]) > EPS || ks.rx || ks.ry || ks.rz || ks.or) continue
+				const a = staticOf(ks.a, [0, 0]),
+					sc = staticOf(ks.s, [100, 100]),
+					rr = staticOf(ks.r, [0]),
+					sk = staticOf(ks.sk, [0])
+				if (
+					!a ||
+					!sc ||
+					!rr ||
+					!sk ||
+					Math.abs(sk[0]) > EPS ||
+					ks.rx ||
+					ks.ry ||
+					ks.rz ||
+					ks.or
+				)
+					continue
 				const kids = layers.filter((o) => o.parent === P.ind)
-				const rad = (rr[0] * Math.PI) / 180, c = Math.cos(rad), sn = Math.sin(rad)
-				const sx = (sc[0] != null ? sc[0] : 100) / 100, sy = (sc[1] != null ? sc[1] : sx * 100) / 100
+				const rad = (rr[0] * Math.PI) / 180,
+					c = Math.cos(rad),
+					sn = Math.sin(rad)
+				const sx = (sc[0] != null ? sc[0] : 100) / 100,
+					sy = (sc[1] != null ? sc[1] : sx * 100) / 100
 				const uniform = Math.abs(sx - sy) < EPS
 				const map = (q) => {
-					const X = (q[0] - (a[0] || 0)) * sx, Y = ((q[1] || 0) - (a[1] || 0)) * sy
-					return [pos[0] + c * X - sn * Y, (pos[1] || 0) + sn * X + c * Y]
+					const X = (q[0] - (a[0] || 0)) * sx,
+						Y = ((q[1] || 0) - (a[1] || 0)) * sy
+					return [
+						pos[0] + c * X - sn * Y,
+						(pos[1] || 0) + sn * X + c * Y,
+					]
 				}
 				const ok = kids.every((C) => {
 					const k = C.ks || {}
-					if (C.ao === 1 || C.ddd === 1 || (k.sk && (isAnimated(k.sk) || Math.abs(asArray(k.sk.k)[0] || 0) > EPS))) return false
-					const rotates = k.r && (isAnimated(k.r) || Math.abs(asArray(k.r.k)[0] || 0) > EPS)
+					if (
+						C.ao === 1 ||
+						C.ddd === 1 ||
+						(k.sk &&
+							(isAnimated(k.sk) ||
+								Math.abs(asArray(k.sk.k)[0] || 0) > EPS))
+					)
+						return false
+					const rotates =
+						k.r &&
+						(isAnimated(k.r) ||
+							Math.abs(asArray(k.r.k)[0] || 0) > EPS)
 					if (!uniform && rotates) return false
-					if (k.p && k.p.s && (isAnimated(k.p.x) || isAnimated(k.p.y)) && Math.abs(rr[0]) > EPS) return false
+					if (
+						k.p &&
+						k.p.s &&
+						(isAnimated(k.p.x) || isAnimated(k.p.y)) &&
+						Math.abs(rr[0]) > EPS
+					)
+						return false
 					return !JSON.stringify(k).includes('"x":"')
 				})
 				if (!ok) continue
@@ -764,20 +957,47 @@ export function foldStaticParents(json) {
 					const k = (C.ks = C.ks || {})
 					if (k.p && k.p.s) {
 						if (Math.abs(rr[0]) < EPS) {
-							k.p.x = mapValues(k.p.x, (v) => [pos[0] + (v[0] - (a[0] || 0)) * sx])
-							k.p.y = mapValues(k.p.y, (v) => [(pos[1] || 0) + (v[0] - (a[1] || 0)) * sy])
+							k.p.x = mapValues(k.p.x, (v) => [
+								pos[0] + (v[0] - (a[0] || 0)) * sx,
+							])
+							k.p.y = mapValues(k.p.y, (v) => [
+								(pos[1] || 0) + (v[0] - (a[1] || 0)) * sy,
+							])
 						} else {
-							const q = map([asArray(k.p.x.k)[0], asArray(k.p.y.k)[0]])
+							const q = map([
+								asArray(k.p.x.k)[0],
+								asArray(k.p.y.k)[0],
+							])
 							k.p.x = { a: 0, k: q[0] }
 							k.p.y = { a: 0, k: q[1] }
 						}
 					} else {
-						const lin = (v) => [c * v[0] * sx - sn * (v[1] || 0) * sy, sn * v[0] * sx + c * (v[1] || 0) * sy]
-						k.p = mapValues(k.p || { a: 0, k: [0, 0, 0] }, (v) => map(v).concat(v.length > 2 ? [v[2]] : []))
-						if (isAnimated(k.p)) k.p.k.forEach((kf) => ['to', 'ti'].forEach((f) => kf[f] && (kf[f] = lin(kf[f]).concat(kf[f].length > 2 ? [kf[f][2]] : []))))
+						const lin = (v) => [
+							c * v[0] * sx - sn * (v[1] || 0) * sy,
+							sn * v[0] * sx + c * (v[1] || 0) * sy,
+						]
+						k.p = mapValues(k.p || { a: 0, k: [0, 0, 0] }, (v) =>
+							map(v).concat(v.length > 2 ? [v[2]] : [])
+						)
+						if (isAnimated(k.p))
+							k.p.k.forEach((kf) =>
+								['to', 'ti'].forEach(
+									(f) =>
+										kf[f] &&
+										(kf[f] = lin(kf[f]).concat(
+											kf[f].length > 2 ? [kf[f][2]] : []
+										))
+								)
+							)
 					}
-					k.r = mapValues(k.r || { a: 0, k: 0 }, (v) => [v[0] + rr[0]])
-					k.s = mapValues(k.s || { a: 0, k: [100, 100, 100] }, (v) => [v[0] * sx, (v[1] != null ? v[1] : v[0]) * sy].concat(v.length > 2 ? [v[2]] : []))
+					k.r = mapValues(k.r || { a: 0, k: 0 }, (v) => [
+						v[0] + rr[0],
+					])
+					k.s = mapValues(k.s || { a: 0, k: [100, 100, 100] }, (v) =>
+						[v[0] * sx, (v[1] != null ? v[1] : v[0]) * sy].concat(
+							v.length > 2 ? [v[2]] : []
+						)
+					)
 					if (P.parent != null) C.parent = P.parent
 					else delete C.parent
 				}
@@ -793,8 +1013,24 @@ export function foldStaticParents(json) {
 // A shape group's transform item is the identity (and it isn't faded).
 function identityTr(tr) {
 	if (!tr) return true
-	const is = (p, d) => !p || (!isAnimated(p) && !p.x && asArray(p.k).every((v, i) => Math.abs(v - (d[i] != null ? d[i] : d[0])) < EPS))
-	return is(tr.p, [0, 0]) && is(tr.a, [0, 0]) && is(tr.s, [100, 100]) && is(tr.r, [0]) && is(tr.o, [100]) && is(tr.sk, [0]) && !tr.rx && !tr.ry && !tr.rz
+	const is = (p, d) =>
+		!p ||
+		(!isAnimated(p) &&
+			!p.x &&
+			asArray(p.k).every(
+				(v, i) => Math.abs(v - (d[i] != null ? d[i] : d[0])) < EPS
+			))
+	return (
+		is(tr.p, [0, 0]) &&
+		is(tr.a, [0, 0]) &&
+		is(tr.s, [100, 100]) &&
+		is(tr.r, [0]) &&
+		is(tr.o, [100]) &&
+		is(tr.sk, [0]) &&
+		!tr.rx &&
+		!tr.ry &&
+		!tr.rz
+	)
 }
 
 // Cavalry wraps every path in groups inside groups, each with a full transform. A group
@@ -807,22 +1043,30 @@ export function flattenShapeGroups(json) {
 	// top: the layer's own shape list, which has no transform item to take a group's over
 	const flatten = (items, top) => {
 		if (!Array.isArray(items)) return items
-		for (const it of items) if (it && it.ty === 'gr') it.it = flatten(it.it, false)
+		for (const it of items)
+			if (it && it.ty === 'gr') it.it = flatten(it.it, false)
 		for (;;) {
 			const rest = items.filter((it) => it.ty !== 'tr')
 			const ownTr = items.find((it) => it.ty === 'tr')
 			if (rest.length !== 1 || rest[0].ty !== 'gr') return items
 			const g = rest[0]
-			if (g.hd || (g.bm && g.bm !== 0) || !Array.isArray(g.it)) return items
+			if (g.hd || (g.bm && g.bm !== 0) || !Array.isArray(g.it))
+				return items
 			const inner = g.it.find((it) => it.ty === 'tr')
 			// an identity inner group adds nothing, whatever this level's transform is
-			if (identityTr(inner)) items = g.it.filter((it) => it.ty !== 'tr').concat(ownTr ? [ownTr] : [])
-			else if (!top && identityTr(ownTr)) items = g.it.slice() // the inner transform replaces this level's identity one
+			if (identityTr(inner))
+				items = g.it
+					.filter((it) => it.ty !== 'tr')
+					.concat(ownTr ? [ownTr] : [])
+			else if (!top && identityTr(ownTr))
+				items = g.it.slice() // the inner transform replaces this level's identity one
 			else return items
 			n++
 		}
 	}
-	for (const layers of layerLists(json)) for (const L of layers) if (Array.isArray(L.shapes)) L.shapes = flatten(L.shapes, true)
+	for (const layers of layerLists(json))
+		for (const L of layers)
+			if (Array.isArray(L.shapes)) L.shapes = flatten(L.shapes, true)
 	return n
 }
 
@@ -848,17 +1092,28 @@ function namesUsedByExpressions(json) {
 // 11. Metadata. opts: {names, matchNames, markers, keepNames: [..]}
 export function stripMeta(json, opts = {}) {
 	let n = 0
-	const keepNames = new Set([...(opts.keepNames || []), ...namesUsedByExpressions(json)])
+	const keepNames = new Set([
+		...(opts.keepNames || []),
+		...namesUsedByExpressions(json),
+	])
 	const drop = new Set(['ln', 'cl'])
 	if (opts.matchNames) drop.add('mn')
 	const walk = (node, inEffects) => {
 		if (Array.isArray(node)) return node.forEach((v) => walk(v, inEffects))
 		if (!isObj(node)) return
 		for (const k of Object.keys(node)) {
-			if (drop.has(k) && !(k === 'mn' && inEffects && opts.keepEffectMatchNames)) {
+			if (
+				drop.has(k) &&
+				!(k === 'mn' && inEffects && opts.keepEffectMatchNames)
+			) {
 				delete node[k]
 				n++
-			} else if (k === 'nm' && opts.names && typeof node.nm === 'string' && !keepNames.has(node.nm)) {
+			} else if (
+				k === 'nm' &&
+				opts.names &&
+				typeof node.nm === 'string' &&
+				!keepNames.has(node.nm)
+			) {
 				delete node.nm
 				n++
 			} else walk(node[k], inEffects || k === 'ef')
@@ -889,7 +1144,8 @@ function category(key, owner) {
 		case 'sa':
 			return 'angle'
 		case 's':
-			if (ty === 'rc' || ty === 'el' || ty === 'gf' || ty === 'gs') return 'px' // sizes, gradient start
+			if (ty === 'rc' || ty === 'el' || ty === 'gf' || ty === 'gs')
+				return 'px' // sizes, gradient start
 			if (ty === 'tm') return 'opacity'
 			return 'scale'
 		case 'e':
@@ -909,11 +1165,17 @@ export const BUDGET = { rigid: 0.25, fit: 0.7, round: 0.05 }
 
 function maxScale(p) {
 	if (!p) return 1
-	const vals = isAnimated(p) ? p.k.map((k) => k.s).filter((v) => v !== undefined) : [p.k]
+	const vals = isAnimated(p)
+		? p.k.map((k) => k.s).filter((v) => v !== undefined)
+		: [p.k]
 	let m = 0
 	for (const v of vals) {
 		const a = asArray(v)
-		m = Math.max(m, Math.abs(a[0] != null ? a[0] : 100), Math.abs(a[1] != null ? a[1] : a[0] != null ? a[0] : 100))
+		m = Math.max(
+			m,
+			Math.abs(a[0] != null ? a[0] : 100),
+			Math.abs(a[1] != null ? a[1] : a[0] != null ? a[0] : 100)
+		)
 	}
 	return Math.max(m / 100, 1e-3)
 }
@@ -923,36 +1185,71 @@ const first = (p) => (!p ? null : isAnimated(p) ? p.k[0].s : p.k)
 // How far a layer's content reaches from its anchor, in the layer's own pixels.
 function layerRadius(L, json, assets) {
 	const a = asArray(first(L.ks && L.ks.a))
-	const ax = a[0] || 0, ay = a[1] || 0
+	const ax = a[0] || 0,
+		ay = a[1] || 0
 	let r = 0
-	const box = (w, h) => [[0, 0], [w, 0], [0, h], [w, h]].forEach((c) => (r = Math.max(r, Math.hypot(c[0] - ax, c[1] - ay))))
+	const box = (w, h) =>
+		[
+			[0, 0],
+			[w, 0],
+			[0, h],
+			[w, h],
+		].forEach((c) => (r = Math.max(r, Math.hypot(c[0] - ax, c[1] - ay))))
 	if (L.ty === 4) {
 		// a group's anchor lands within `base` of the layer anchor; its content is scaled by k.
 		// Rotation is bounded, not applied, so this can only overestimate.
 		const walk = (items, base, k, gx, gy) => {
-			const at = (q) => (r = Math.max(r, base + k * Math.hypot(q[0] - gx, q[1] - gy)))
+			const at = (q) =>
+				(r = Math.max(r, base + k * Math.hypot(q[0] - gx, q[1] - gy)))
 			for (const it of items || []) {
 				if (!it) continue
 				if (it.ty === 'gr') {
-					const tr = (it.it || []).find((x) => x && x.ty === 'tr') || {}
-					const p = asArray(first(tr.p)), ga = asArray(first(tr.a))
-					walk(it.it, base + k * Math.hypot((p[0] || 0) - gx, (p[1] || 0) - gy), k * maxScale(tr.s), ga[0] || 0, ga[1] || 0)
+					const tr =
+						(it.it || []).find((x) => x && x.ty === 'tr') || {}
+					const p = asArray(first(tr.p)),
+						ga = asArray(first(tr.a))
+					walk(
+						it.it,
+						base +
+							k * Math.hypot((p[0] || 0) - gx, (p[1] || 0) - gy),
+						k * maxScale(tr.s),
+						ga[0] || 0,
+						ga[1] || 0
+					)
 				} else if (it.ty === 'sh') {
-					for (const sh of asArray(first(it.ks))) if (sh && sh.v) sh.v.forEach(at)
+					for (const sh of asArray(first(it.ks)))
+						if (sh && sh.v) sh.v.forEach(at)
 				} else if (it.ty === 'rc' || it.ty === 'el') {
-					const c = asArray(first(it.p)), sz = asArray(first(it.s))
-					at([(c[0] || 0) + (sz[0] || 0) / 2, (c[1] || 0) + (sz[1] || 0) / 2])
-					at([(c[0] || 0) - (sz[0] || 0) / 2, (c[1] || 0) - (sz[1] || 0) / 2])
+					const c = asArray(first(it.p)),
+						sz = asArray(first(it.s))
+					at([
+						(c[0] || 0) + (sz[0] || 0) / 2,
+						(c[1] || 0) + (sz[1] || 0) / 2,
+					])
+					at([
+						(c[0] || 0) - (sz[0] || 0) / 2,
+						(c[1] || 0) - (sz[1] || 0) / 2,
+					])
 				} else if (it.ty === 'sr') {
 					const c = asArray(first(it.p))
-					r = Math.max(r, base + k * (Math.hypot((c[0] || 0) - gx, (c[1] || 0) - gy) + (asArray(first(it.or))[0] || 0)))
+					r = Math.max(
+						r,
+						base +
+							k *
+								(Math.hypot(
+									(c[0] || 0) - gx,
+									(c[1] || 0) - gy
+								) +
+									(asArray(first(it.or))[0] || 0))
+					)
 				}
 			}
 		}
 		walk(L.shapes, 0, 1, ax, ay)
 	} else if (L.ty === 0 && L.w) box(L.w, L.h)
 	else if (L.ty === 1) box(L.sw || 0, L.sh || 0)
-	else if (L.ty === 2 && assets[L.refId]) box(assets[L.refId].w || 0, assets[L.refId].h || 0)
+	else if (L.ty === 2 && assets[L.refId])
+		box(assets[L.refId].w || 0, assets[L.refId].h || 0)
 	return r > EPS ? r : Math.hypot(json.w || 1000, json.h || 1000) / 2
 }
 
@@ -968,14 +1265,18 @@ function layerContexts(json, display) {
 		const memo = new Map()
 		const world = (L, depth) => {
 			if (memo.has(L)) return memo.get(L)
-			const par = L.parent != null && depth < 64 ? byInd.get(L.parent) : null
-			const w = (par ? world(par, depth + 1) : outer) * maxScale(L.ks && L.ks.s)
+			const par =
+				L.parent != null && depth < 64 ? byInd.get(L.parent) : null
+			const w =
+				(par ? world(par, depth + 1) : outer) * maxScale(L.ks && L.ks.s)
 			memo.set(L, w)
 			return w
 		}
 		// a parent's size includes its children's: turning or scaling it moves them too
 		const kids = new Map()
-		for (const L of layers) if (L.parent != null && byInd.has(L.parent)) kids.set(L.parent, (kids.get(L.parent) || []).concat([L]))
+		for (const L of layers)
+			if (L.parent != null && byInd.has(L.parent))
+				kids.set(L.parent, (kids.get(L.parent) || []).concat([L]))
 		const reach = new Map()
 		const radius = (L, depth) => {
 			if (reach.has(L)) return reach.get(L)
@@ -983,8 +1284,18 @@ function layerContexts(json, display) {
 			const a = asArray(first(L.ks && L.ks.a))
 			for (const c of depth < 64 ? kids.get(L.ind) || [] : []) {
 				const cp = c.ks && c.ks.p
-				const p = cp && cp.s ? [asArray(first(cp.x))[0], asArray(first(cp.y))[0]] : asArray(first(cp)) // split x/y position
-				r = Math.max(r, Math.hypot((p[0] || 0) - (a[0] || 0), (p[1] || 0) - (a[1] || 0)) + radius(c, depth + 1) * maxScale(c.ks && c.ks.s))
+				const p =
+					cp && cp.s
+						? [asArray(first(cp.x))[0], asArray(first(cp.y))[0]]
+						: asArray(first(cp)) // split x/y position
+				r = Math.max(
+					r,
+					Math.hypot(
+						(p[0] || 0) - (a[0] || 0),
+						(p[1] || 0) - (a[1] || 0)
+					) +
+						radius(c, depth + 1) * maxScale(c.ks && c.ks.s)
+				)
 			}
 			if (r < EPS) r = layerRadius(L, json, assets)
 			reach.set(L, r)
@@ -993,15 +1304,21 @@ function layerContexts(json, display) {
 		for (const L of layers) {
 			const par = L.parent != null ? byInd.get(L.parent) : null
 			const scale = world(L, 0)
-			ctx.set(L, { scale: scale * display, parent: (par ? world(par, 1) : outer) * display, radius: radius(L, 0) })
-			if (L.ty === 0 && L.refId != null) assetScale[L.refId] = Math.max(assetScale[L.refId] || 0, scale)
+			ctx.set(L, {
+				scale: scale * display,
+				parent: (par ? world(par, 1) : outer) * display,
+				radius: radius(L, 0),
+			})
+			if (L.ty === 0 && L.refId != null)
+				assetScale[L.refId] = Math.max(assetScale[L.refId] || 0, scale)
 		}
 	}
 	// precomps can nest: repeat until every asset's scale (the largest use) settles
 	for (let pass = 0; pass < 8; pass++) {
 		const before = JSON.stringify(assetScale)
 		visit(json.layers || [], 1)
-		for (const a of json.assets || []) if (Array.isArray(a.layers)) visit(a.layers, assetScale[a.id] || 1)
+		for (const a of json.assets || [])
+			if (Array.isArray(a.layers)) visit(a.layers, assetScale[a.id] || 1)
 		if (JSON.stringify(assetScale) === before) break
 	}
 	return ctx
@@ -1044,12 +1361,25 @@ function forEachLayerProp(json, opts, share, fn) {
 		for (const L of layers) {
 			const c = ctx.get(L)
 			const own = toleranceFor(opts, json, c, c.parent, share)
-			const inner = (mult) => toleranceFor(opts, json, c, c.scale * mult, share)
+			const inner = (mult) =>
+				toleranceFor(opts, json, c, c.scale * mult, share)
 			// an anchor sits in the space its transform scales, unlike the rest of the transform
-			if (L.ks) forEachProp(L.ks, (p, key, owner) => fn(p, key, owner, key === 'a' ? inner(1) : own, L), 'ks', L)
+			if (L.ks)
+				forEachProp(
+					L.ks,
+					(p, key, owner) =>
+						fn(p, key, owner, key === 'a' ? inner(1) : own, L),
+					'ks',
+					L
+				)
 			for (const k in L) {
 				if (k === 'ks' || k === 'shapes') continue
-				forEachProp(L[k], (p, key, owner) => fn(p, key, owner, inner(1), L), k, L)
+				forEachProp(
+					L[k],
+					(p, key, owner) => fn(p, key, owner, inner(1), L),
+					k,
+					L
+				)
 			}
 			const walk = (items, mult) => {
 				if (!Array.isArray(items)) return
@@ -1058,10 +1388,40 @@ function forEachLayerProp(json, opts, share, fn) {
 					if (it && it.ty === 'gr') {
 						const tr = (it.it || []).find((x) => x && x.ty === 'tr')
 						const m = mult * maxScale(tr && tr.s)
-						if (tr) forEachProp(tr, (p, key, owner) => fn(p, key, owner, key === 'a' ? inner(m) : tol, L), 'tr', it.it)
-						walk((it.it || []).filter((x) => x !== tr), m)
-						for (const k in it) if (k !== 'it') forEachProp(it[k], (p, key, owner) => fn(p, key, owner, tol, L), k, it)
-					} else forEachProp(it, (p, key, owner) => fn(p, key, owner, tol, L), undefined, items)
+						if (tr)
+							forEachProp(
+								tr,
+								(p, key, owner) =>
+									fn(
+										p,
+										key,
+										owner,
+										key === 'a' ? inner(m) : tol,
+										L
+									),
+								'tr',
+								it.it
+							)
+						walk(
+							(it.it || []).filter((x) => x !== tr),
+							m
+						)
+						for (const k in it)
+							if (k !== 'it')
+								forEachProp(
+									it[k],
+									(p, key, owner) =>
+										fn(p, key, owner, tol, L),
+									k,
+									it
+								)
+					} else
+						forEachProp(
+							it,
+							(p, key, owner) => fn(p, key, owner, tol, L),
+							undefined,
+							items
+						)
 				}
 			}
 			walk(L.shapes, 1)
@@ -1069,7 +1429,8 @@ function forEachLayerProp(json, opts, share, fn) {
 }
 
 // Decimals whose rounding (at most half a unit of the last place) stays within tol.
-const decimalsFor = (tol) => Math.min(5, Math.max(0, Math.ceil(-Math.log10(2 * tol))))
+const decimalsFor = (tol) =>
+	Math.min(5, Math.max(0, Math.ceil(-Math.log10(2 * tol))))
 
 // A keyframe value as a flat list of numbers (shapes: every vertex and tangent).
 function flatten(s) {
@@ -1079,7 +1440,8 @@ function flatten(s) {
 		const out = []
 		for (const sh of s) {
 			if (!sh.v) return null
-			for (const f of ['v', 'i', 'o']) for (const pt of sh[f]) out.push(pt[0], pt[1])
+			for (const f of ['v', 'i', 'o'])
+				for (const pt of sh[f]) out.push(pt[0], pt[1])
 			out.push(sh.c ? 1 : 0)
 		}
 		return out
@@ -1097,7 +1459,8 @@ const JUMP = { px: 2, scale: 2, angle: 2, opacity: 5, color: 0.05 }
 // top of the last one (the shape doesn't change), and holds where the real count changes.
 function padShape(sh, n) {
 	if (!sh || !Array.isArray(sh.v) || sh.v.length >= n || !sh.v.length) return
-	const last = sh.v.length - 1, out = sh.o[last]
+	const last = sh.v.length - 1,
+		out = sh.o[last]
 	sh.o[last] = [0, 0]
 	while (sh.v.length < n) {
 		sh.v.push(sh.v[last].slice())
@@ -1118,7 +1481,8 @@ export function equalisePathPoints(json) {
 		const counts = (kf) => kf.s.map((sh) => (sh.v || []).length).join(',')
 		if (k.every((kf) => counts(kf) === counts(k[0]))) return
 		for (let j = 0; j < p.k.length - 1; j++) {
-			const a = p.k[j], b = p.k[j + 1]
+			const a = p.k[j],
+				b = p.k[j + 1]
 			if (a.s && b.s && counts(a) !== counts(b) && a.h !== 1) {
 				a.h = 1
 				delete a.i
@@ -1149,15 +1513,27 @@ export function holdJumps(json, opts = {}) {
 		const k = p.k
 		const vals = k.map((kf) => (kf.s === undefined ? null : flatten(kf.s)))
 		const rate = (i) => {
-			if (!vals[i] || !vals[i + 1] || k[i].h === 1 || vals[i].length !== vals[i + 1].length) return null
+			if (
+				!vals[i] ||
+				!vals[i + 1] ||
+				k[i].h === 1 ||
+				vals[i].length !== vals[i + 1].length
+			)
+				return null
 			let d = 0
-			for (let x = 0; x < vals[i].length; x++) d = Math.max(d, Math.abs(vals[i + 1][x] - vals[i][x]))
+			for (let x = 0; x < vals[i].length; x++)
+				d = Math.max(d, Math.abs(vals[i + 1][x] - vals[i][x]))
 			return d / Math.max(k[i + 1].t - k[i].t, 1e-9)
 		}
 		const rates = k.slice(0, -1).map((_, i) => rate(i))
 		const min = JUMP[category(key, owner)]
 		for (let i = 0; i < k.length - 1; i++) {
-			if (k[i + 1].t - k[i].t > 1 + EPS || rates[i] == null || k[i].h === 1) continue
+			if (
+				k[i + 1].t - k[i].t > 1 + EPS ||
+				rates[i] == null ||
+				k[i].h === 1
+			)
+				continue
 			const around = [rates[i - 1], rates[i + 1]].filter((v) => v != null)
 			const jump = rates[i] > min && rates[i] > 5 * Math.max(0, ...around)
 			if (!opts.all && !jump) continue
@@ -1183,7 +1559,8 @@ export function holdJumps(json, opts = {}) {
 // A blink value is "rest" when within 1% of the property's non-zero level (usually 100).
 export function binaryWindows(json, opts = {}) {
 	let n = 0
-	const level = (v) => (Math.abs(v - 100) < 1 ? 100 : Math.abs(v) < 1 ? 0 : null)
+	const level = (v) =>
+		Math.abs(v - 100) < 1 ? 100 : Math.abs(v) < 1 ? 0 : null
 	const windows = (p) => {
 		// The 0/rest runs as [startT, endT) spans; null when the curve isn't a binary step.
 		if (!p || !isAnimated(p) || p.k.length < 2 || p.x) return null
@@ -1198,7 +1575,8 @@ export function binaryWindows(json, opts = {}) {
 				// is a same-value run's padding (value equal on both ends)
 				const nv = kf.s
 				const nx = k[k.indexOf(kf) + 1]
-				if (nx && level(Array.isArray(nx.s) ? nx.s[0] : nx.s) !== v) return null
+				if (nx && level(Array.isArray(nx.s) ? nx.s[0] : nx.s) !== v)
+					return null
 			}
 			if (v === 100) {
 				if (!cur) cur = [kf.t, kf.t]
@@ -1232,27 +1610,36 @@ export function binaryWindows(json, opts = {}) {
 				const walk = (items, path) => {
 					for (let idx = 0; idx < (items || []).length; idx++) {
 						const it = items[idx]
-						if (PAINT_ITEMS.includes(it.ty) && windows(it.o)) paths.push([...path, idx])
+						if (PAINT_ITEMS.includes(it.ty) && windows(it.o))
+							paths.push([...path, idx])
 						if (it.ty === 'gr') walk(it.it, [...path, idx, 'it'])
 					}
 				}
 				walk(L.shapes, ['shapes'])
 				if (paths.length === 1) {
 					paintPath = paths[0]
-					spans = windows(paintPath.reduce((node, idx) => node[idx], L).o)
+					spans = windows(
+						paintPath.reduce((node, idx) => node[idx], L).o
+					)
 				}
 			}
 			if (!spans) continue
 			// guards: the layer's transform must be static and nothing may offset its timing
 			const ks = L.ks || {}
-			const staticish = [ks.p, ks.s, ks.r, ks.a].every((q) => !q || !isAnimated(q))
-			if (!staticish || L.parent != null || L.tt || L.tm || L.hasMask) continue
+			const staticish = [ks.p, ks.s, ks.r, ks.a].every(
+				(q) => !q || !isAnimated(q)
+			)
+			if (!staticish || L.parent != null || L.tt || L.tm || L.hasMask)
+				continue
 			// clamp the windows to the layer's and comp's visible ranges FIRST, so the
 			// profitability check sees what the clones would actually cover
 			const lo = Math.max(L.ip != null ? L.ip : -Infinity, rootFrom)
 			const hi = Math.min(L.op != null ? L.op : Infinity, rootTo)
 			const on = spans
-				.map(([a, b]) => [Math.max(a, lo), Math.min(b == Infinity ? hi : b, hi)])
+				.map(([a, b]) => [
+					Math.max(a, lo),
+					Math.min(b == Infinity ? hi : b, hi),
+				])
 				.filter(([a, b]) => b > a)
 			const totalOn = on.reduce((s, [a, b]) => s + (b - a), 0)
 			const total = hi - lo
@@ -1265,7 +1652,9 @@ export function binaryWindows(json, opts = {}) {
 			// curve dominates the layer's size. (All-size-0 JSON like test fixtures with
 			// tiny static curves still splits: the guard trips only on real size gaps.)
 			if (paintPath) {
-				const blink = JSON.stringify(paintPath.reduce((node, idx) => node[idx], L).o).length
+				const blink = JSON.stringify(
+					paintPath.reduce((node, idx) => node[idx], L).o
+				).length
 				const whole = JSON.stringify(L).length
 				if (whole > 600 && blink * 3 < whole) continue
 			} else {
@@ -1279,19 +1668,23 @@ export function binaryWindows(json, opts = {}) {
 				const per = on.length * (whole - blink)
 				if (whole > 600 && per >= blink) continue
 			}
-			const clones = on.map(([a, b]) => {
-				const c = JSON.parse(JSON.stringify(L))
-				delete c.nm
-				c.ip = a
-				c.op = b
-				c.ks = Object.assign({}, c.ks, { o: { a: 0, k: 100 } })
-				if (paintPath) {
-					// the clone's sole blinking paint burns at full strength inside its window
-					const p = paintPath.slice(0, -1).reduce((node, idx) => node[idx], c)
-					p[paintPath[paintPath.length - 1]].o = { a: 0, k: 100 }
-				}
-				return c
-			}).filter((c) => c.op > c.ip)
+			const clones = on
+				.map(([a, b]) => {
+					const c = JSON.parse(JSON.stringify(L))
+					delete c.nm
+					c.ip = a
+					c.op = b
+					c.ks = Object.assign({}, c.ks, { o: { a: 0, k: 100 } })
+					if (paintPath) {
+						// the clone's sole blinking paint burns at full strength inside its window
+						const p = paintPath
+							.slice(0, -1)
+							.reduce((node, idx) => node[idx], c)
+						p[paintPath[paintPath.length - 1]].o = { a: 0, k: 100 }
+					}
+					return c
+				})
+				.filter((c) => c.op > c.ip)
 			if (!clones.length) continue
 			layers.splice(i, 1, ...clones)
 			n += clones.length
@@ -1320,8 +1713,18 @@ export function simplifyKeys(json, opts = {}) {
 		const kind = category(key, owner)
 		if (kind === 'time') return
 		const tol = tolFor(kind) * (shape ? ANIMATED_PATH_SHARE : 1)
-		const motionPath = key === 'p' && !shape && (dims === 2 || (dims === 3 && vals.every((v) => Math.abs(v[2] - vals[0][2]) < EPS)))
-		const fittable = (j) => k[j].h !== 1 && !hasSpatial(k[j]) && (opts.eased || k[j + 1].t - k[j].t <= 1 + EPS || isLinearSegment(k[j], dims))
+		const motionPath =
+			key === 'p' &&
+			!shape &&
+			(dims === 2 ||
+				(dims === 3 &&
+					vals.every((v) => Math.abs(v[2] - vals[0][2]) < EPS)))
+		const fittable = (j) =>
+			k[j].h !== 1 &&
+			!hasSpatial(k[j]) &&
+			(opts.eased ||
+				k[j + 1].t - k[j].t <= 1 + EPS ||
+				isLinearSegment(k[j], dims))
 
 		// the original's value part-way (u) through segment j, with its own ease
 		const between = (j, u) => {
@@ -1329,20 +1732,34 @@ export function simplifyKeys(json, opts = {}) {
 			const lin = isLinearSegment(kf, dims)
 			return vals[j].map((v, d) => {
 				const c = shape ? 0 : d % dims
-				const y = lin ? u : easeAt({ x1: component(kf.o.x, c), y1: component(kf.o.y, c), x2: component(kf.i.x, c), y2: component(kf.i.y, c) }, u)
+				const y = lin
+					? u
+					: easeAt(
+							{
+								x1: component(kf.o.x, c),
+								y1: component(kf.o.y, c),
+								x2: component(kf.i.x, c),
+								y2: component(kf.i.y, c),
+							},
+							u
+						)
 				return v + (vals[j + 1][d] - v) * y
 			})
 		}
 		// samples (time, value) of the original between keys a and b
 		const samples = (a, b) => {
-			const ts = [], vs = []
+			const ts = [],
+				vs = []
 			for (let j = a; j <= b; j++) {
 				ts.push(k[j].t)
 				vs.push(vals[j])
 				const gap = j < b ? k[j + 1].t - k[j].t : 0
 				// every half frame, so a curve can't swing out between the keys (players draw
 				// in-between frames, and time-remapped precomps land between them too)
-				const m = j < b ? Math.max(1, Math.min(64, Math.ceil(2 * gap) - 1)) : 0
+				const m =
+					j < b
+						? Math.max(1, Math.min(64, Math.ceil(2 * gap) - 1))
+						: 0
 				for (let q = 1; q <= m; q++) {
 					const u = q / (m + 1)
 					ts.push(k[j].t + gap * u)
@@ -1353,7 +1770,10 @@ export function simplifyKeys(json, opts = {}) {
 		}
 		const fitSpan = (a, b) => {
 			const { ts, vs } = samples(a, b)
-			const A = vals[a], B = vals[b], t0 = k[a].t, span = k[b].t - t0
+			const A = vals[a],
+				B = vals[b],
+				t0 = k[a].t,
+				span = k[b].t - t0
 			const us = ts.map((t) => (t - t0) / span)
 			const D = B.map((v, d) => v - A[d])
 			const dd = D.reduce((m, v) => m + v * v, 0)
@@ -1361,21 +1781,36 @@ export function simplifyKeys(json, opts = {}) {
 				let worst = 0
 				for (let j = 0; j < vs.length; j++) {
 					const y = easeAt(e, us[j])
-					for (let d = 0; d < D.length; d++) worst = Math.max(worst, Math.abs(A[d] + D[d] * y - vs[j][d]))
+					for (let d = 0; d < D.length; d++)
+						worst = Math.max(
+							worst,
+							Math.abs(A[d] + D[d] * y - vs[j][d])
+						)
 				}
 				return worst
 			}
 			if (dd < EPS) return along(LINEAR) <= tol ? { ease: LINEAR } : null
-			const ps = vs.map((v) => v.reduce((m, x, d) => m + (x - A[d]) * D[d], 0) / dd)
+			const ps = vs.map(
+				(v) => v.reduce((m, x, d) => m + (x - A[d]) * D[d], 0) / dd
+			)
 			// a value off the straight line from A to B can't be reached by any ease
 			let off = 0
-			for (let j = 0; j < vs.length && off <= tol; j++) for (let d = 0; d < D.length; d++) off = Math.max(off, Math.abs(A[d] + D[d] * ps[j] - vs[j][d]))
+			for (let j = 0; j < vs.length && off <= tol; j++)
+				for (let d = 0; d < D.length; d++)
+					off = Math.max(
+						off,
+						Math.abs(A[d] + D[d] * ps[j] - vs[j][d])
+					)
 			if (off <= tol) {
 				const ease = fitEase(us, ps, along, tol)
 				if (ease) return { ease }
 			}
 			if (!motionPath || vs.length < 4) return null
-			return fitMotionPath(us, vs.map((v) => [v[0], v[1]]), tol)
+			return fitMotionPath(
+				us,
+				vs.map((v) => [v[0], v[1]]),
+				tol
+			)
 		}
 		const setEase = (kf, f) => {
 			// shapes and motion-path keys take one ease (lottie-web reads them as plain numbers)
@@ -1391,7 +1826,7 @@ export function simplifyKeys(json, opts = {}) {
 		}
 
 		const kept = [k[0]]
-		for (let a = 0; a < k.length - 1; ) {
+		for (let a = 0; a < k.length - 1;) {
 			if (!fittable(a)) {
 				kept.push(k[++a])
 				continue
@@ -1399,7 +1834,9 @@ export function simplifyKeys(json, opts = {}) {
 			let end = a
 			while (end < k.length - 1 && fittable(end)) end++
 			// furthest key that one segment from `a` can reach: double, then halve
-			let good = a + 1, best = null, bad = null
+			let good = a + 1,
+				best = null,
+				bad = null
 			for (let step = 1; good < end; step *= 2) {
 				const b = Math.min(good + step, end)
 				const f = fitSpan(a, b)
@@ -1413,7 +1850,7 @@ export function simplifyKeys(json, opts = {}) {
 			while (bad != null && bad - good > 1) {
 				const mid = (good + bad) >> 1
 				const f = fitSpan(a, mid)
-				if (f) (good = mid), (best = f)
+				if (f) ((good = mid), (best = f))
 				else bad = mid
 			}
 			if (best && good > a + 1) {
@@ -1431,23 +1868,35 @@ export function simplifyKeys(json, opts = {}) {
 // Least-squares 2D similarity (rotation, uniform scale, translation) mapping P onto Q.
 function fitSimilarity(P, Q, allowScale) {
 	const m = P.length
-	let px = 0, py = 0, qx = 0, qy = 0
-	for (let i = 0; i < m; i++) (px += P[i][0]), (py += P[i][1]), (qx += Q[i][0]), (qy += Q[i][1])
-	;(px /= m), (py /= m), (qx /= m), (qy /= m)
-	let a = 0, b = 0, pp = 0
+	let px = 0,
+		py = 0,
+		qx = 0,
+		qy = 0
+	for (let i = 0; i < m; i++)
+		((px += P[i][0]), (py += P[i][1]), (qx += Q[i][0]), (qy += Q[i][1]))
+	;((px /= m), (py /= m), (qx /= m), (qy /= m))
+	let a = 0,
+		b = 0,
+		pp = 0
 	for (let i = 0; i < m; i++) {
-		const x = P[i][0] - px, y = P[i][1] - py, u = Q[i][0] - qx, v = Q[i][1] - qy
+		const x = P[i][0] - px,
+			y = P[i][1] - py,
+			u = Q[i][0] - qx,
+			v = Q[i][1] - qy
 		a += x * u + y * v
 		b += x * v - y * u
 		pp += x * x + y * y
 	}
 	const th = Math.atan2(b, a)
 	const s = allowScale && pp > EPS ? Math.hypot(a, b) / pp : 1
-	const c = Math.cos(th) * s, sn = Math.sin(th) * s
-	const tx = qx - (c * px - sn * py), ty = qy - (sn * px + c * py)
+	const c = Math.cos(th) * s,
+		sn = Math.sin(th) * s
+	const tx = qx - (c * px - sn * py),
+		ty = qy - (sn * px + c * py)
 	let err = 0
 	for (let i = 0; i < m; i++) {
-		const x = c * P[i][0] - sn * P[i][1] + tx, y = sn * P[i][0] + c * P[i][1] + ty
+		const x = c * P[i][0] - sn * P[i][1] + tx,
+			y = sn * P[i][0] + c * P[i][1] + ty
 		err = Math.max(err, Math.hypot(x - Q[i][0], y - Q[i][1]))
 	}
 	return { th, s, tx, ty, err }
@@ -1458,7 +1907,11 @@ function shapePoints(shapes) {
 	const pts = []
 	for (const sh of shapes)
 		sh.v.forEach((v, i) => {
-			pts.push(v, [v[0] + sh.i[i][0], v[1] + sh.i[i][1]], [v[0] + sh.o[i][0], v[1] + sh.o[i][1]])
+			pts.push(
+				v,
+				[v[0] + sh.i[i][0], v[1] + sh.i[i][1]],
+				[v[0] + sh.o[i][0], v[1] + sh.o[i][1]]
+			)
 		})
 	return pts
 }
@@ -1477,12 +1930,25 @@ const isStaticIdentityTr = (tr) =>
 // rotate order) + translation mapping P onto Q: a full affine fit with its shear dropped.
 function fitRotateScale(P, Q) {
 	const m = P.length
-	let px = 0, py = 0, qx = 0, qy = 0
-	for (let i = 0; i < m; i++) (px += P[i][0]), (py += P[i][1]), (qx += Q[i][0]), (qy += Q[i][1])
-	;(px /= m), (py /= m), (qx /= m), (qy /= m)
-	let sxx = 0, sxy = 0, syy = 0, a = 0, b = 0, c = 0, d = 0
+	let px = 0,
+		py = 0,
+		qx = 0,
+		qy = 0
+	for (let i = 0; i < m; i++)
+		((px += P[i][0]), (py += P[i][1]), (qx += Q[i][0]), (qy += Q[i][1]))
+	;((px /= m), (py /= m), (qx /= m), (qy /= m))
+	let sxx = 0,
+		sxy = 0,
+		syy = 0,
+		a = 0,
+		b = 0,
+		c = 0,
+		d = 0
 	for (let i = 0; i < m; i++) {
-		const x = P[i][0] - px, y = P[i][1] - py, u = Q[i][0] - qx, v = Q[i][1] - qy
+		const x = P[i][0] - px,
+			y = P[i][1] - py,
+			u = Q[i][0] - qx,
+			v = Q[i][1] - qy
 		sxx += x * x
 		sxy += x * y
 		syy += y * y
@@ -1493,15 +1959,22 @@ function fitRotateScale(P, Q) {
 	}
 	const det = sxx * syy - sxy * sxy
 	if (Math.abs(det) < EPS) return null
-	const m11 = (a * syy - b * sxy) / det, m12 = (b * sxx - a * sxy) / det
-	const m21 = (c * syy - d * sxy) / det, m22 = (d * sxx - c * sxy) / det
-	const th = Math.atan2(m21, m11), co = Math.cos(th), si = Math.sin(th)
-	const sx = Math.hypot(m11, m21), sy = -si * m12 + co * m22
+	const m11 = (a * syy - b * sxy) / det,
+		m12 = (b * sxx - a * sxy) / det
+	const m21 = (c * syy - d * sxy) / det,
+		m22 = (d * sxx - c * sxy) / det
+	const th = Math.atan2(m21, m11),
+		co = Math.cos(th),
+		si = Math.sin(th)
+	const sx = Math.hypot(m11, m21),
+		sy = -si * m12 + co * m22
 	const M = [co * sx, -si * sy, si * sx, co * sy]
-	const tx = qx - (M[0] * px + M[1] * py), ty = qy - (M[2] * px + M[3] * py)
+	const tx = qx - (M[0] * px + M[1] * py),
+		ty = qy - (M[2] * px + M[3] * py)
 	let err = 0
 	for (let i = 0; i < m; i++) {
-		const x = M[0] * P[i][0] + M[1] * P[i][1] + tx, y = M[2] * P[i][0] + M[3] * P[i][1] + ty
+		const x = M[0] * P[i][0] + M[1] * P[i][1] + tx,
+			y = M[2] * P[i][0] + M[3] * P[i][1] + ty
 		err = Math.max(err, Math.hypot(x - Q[i][0], y - Q[i][1]))
 	}
 	return { th, sx, sy, tx, ty, err }
@@ -1513,6 +1986,26 @@ function fitRotateScale(P, Q) {
 // turn between them: moving and scaling every point along straight lines with one ease is
 // exactly what interpolating position and scale does. Turning would swing points on arcs.
 // ponytail: no shear (Lottie skew support varies by player); add sk/sa if bakes need it.
+// A duplicator's copies are one animation sampled at a per-copy time offset. Share the
+// curve once and carry each copy's delay on its `st`. Returns the number of layers
+// rewritten; a duplicator whose copies do not share a curve is left alone.
+function shareDuplicatorAnimationPass(json, opts = {}) {
+	const res = shareDuplicatorAnimation(json, {
+		sharedAnim: true,
+		minSavingBytes: opts.minSavingBytes,
+	})
+	for (const r of res.reports) {
+		if (r.skipped)
+			console.log(
+				'[shared anim] layer ' +
+					r.layer +
+					' kept as baked: ' +
+					r.skipped
+			)
+	}
+	return res.changed
+}
+
 export function recoverRigidMotion(json, opts = {}) {
 	const ctx = layerContexts(json, opts.display || 1)
 	let tol
@@ -1526,15 +2019,27 @@ export function recoverRigidMotion(json, opts = {}) {
 			const tr = it.find((x) => x.ty === 'tr')
 			const paths = it.filter((x) => x.ty === 'sh')
 			if (!paths.length || !isStaticIdentityTr(tr)) continue
-			if (!it.every((x) => ['sh', 'fl', 'st', 'tr'].includes(x.ty))) continue
+			if (!it.every((x) => ['sh', 'fl', 'st', 'tr'].includes(x.ty)))
+				continue
 			if (!paths.every((x) => isAnimated(x.ks) && !x.ks.x)) continue
 			const times = paths[0].ks.k.map((kf) => kf.t)
-			if (times.length < 2 || !paths.every((x) => x.ks.k.length === times.length && x.ks.k.every((kf, j) => kf.t === times[j] && kf.s)))
+			if (
+				times.length < 2 ||
+				!paths.every(
+					(x) =>
+						x.ks.k.length === times.length &&
+						x.ks.k.every((kf, j) => kf.t === times[j] && kf.s)
+				)
+			)
 				continue
-			const frameShapes = times.map((_, j) => paths.flatMap((x) => x.ks.k[j].s))
+			const frameShapes = times.map((_, j) =>
+				paths.flatMap((x) => x.ks.k[j].s)
+			)
 			const spread = (f) => {
 				const q = shapePoints(f)
-				return Math.max(...q.map((a) => Math.hypot(a[0] - q[0][0], a[1] - q[0][1])))
+				return Math.max(
+					...q.map((a) => Math.hypot(a[0] - q[0][0], a[1] - q[0][1]))
+				)
 			}
 			let b0 = 0
 			if (spread(frameShapes[0]) < EPS)
@@ -1542,13 +2047,27 @@ export function recoverRigidMotion(json, opts = {}) {
 					if (spread(f) > spread(frameShapes[b0])) b0 = j
 				})
 			const base = frameShapes[b0]
-			if (!frameShapes.every((f) => f.length === base.length && f.every((sh, i) => sh.v.length === base[i].v.length && !!sh.c === !!base[i].c)))
+			if (
+				!frameShapes.every(
+					(f) =>
+						f.length === base.length &&
+						f.every(
+							(sh, i) =>
+								sh.v.length === base[i].v.length &&
+								!!sh.c === !!base[i].c
+						)
+				)
+			)
 				continue
 			const P = shapePoints(base)
 			// pivot on the shape's centre so position only carries real movement
-			const c = P.reduce((m, q) => [m[0] + q[0] / P.length, m[1] + q[1] / P.length], [0, 0])
+			const c = P.reduce(
+				(m, q) => [m[0] + q[0] / P.length, m[1] + q[1] / P.length],
+				[0, 0]
+			)
 			const stroked = it.some((x) => x.ty === 'st')
-			const fits = [], errs = []
+			const fits = [],
+				errs = []
 			let ok = true,
 				prev = 0
 			for (const f of frameShapes) {
@@ -1565,30 +2084,63 @@ export function recoverRigidMotion(json, opts = {}) {
 				while (deg - prev > 180) deg -= 360
 				while (deg - prev < -180) deg += 360
 				prev = deg
-				const co = Math.cos(fit.th), sn = Math.sin(fit.th)
-				const x = c[0] * fit.sx, y = c[1] * fit.sy
-				fits.push({ p: [co * x - sn * y + fit.tx, sn * x + co * y + fit.ty], r: deg, s: [fit.sx * 100, fit.sy * 100] })
+				const co = Math.cos(fit.th),
+					sn = Math.sin(fit.th)
+				const x = c[0] * fit.sx,
+					y = c[1] * fit.sy
+				fits.push({
+					p: [co * x - sn * y + fit.tx, sn * x + co * y + fit.ty],
+					r: deg,
+					s: [fit.sx * 100, fit.sy * 100],
+				})
 			}
 			if (!ok) continue
 			// across a gap, turning by Δθ swings a point at radius R off the straight line by R(1 − cos(Δθ/2))
-			const R = Math.max(...P.map((q) => Math.hypot(q[0] - c[0], q[1] - c[1])))
+			const R = Math.max(
+				...P.map((q) => Math.hypot(q[0] - c[0], q[1] - c[1]))
+			)
 			const swing = (j) => {
 				const S = Math.max(...fits[j].s, ...fits[j - 1].s, 0) / 100
-				return R * S * (1 - Math.cos((((fits[j].r - fits[j - 1].r) * Math.PI) / 180) / 2))
+				return (
+					R *
+					S *
+					(1 -
+						Math.cos(
+							((fits[j].r - fits[j - 1].r) * Math.PI) / 180 / 2
+						))
+				)
 			}
-			if (times.some((t, j) => j && t - times[j - 1] > 1 + EPS && swing(j) > tol)) continue
+			if (
+				times.some(
+					(t, j) => j && t - times[j - 1] > 1 + EPS && swing(j) > tol
+				)
+			)
+				continue
 			const ease = (j) => {
 				const src = paths[0].ks.k[j]
 				const kf = {}
-				for (const f of ['i', 'o', 'h']) if (src[f] !== undefined) kf[f] = src[f]
+				for (const f of ['i', 'o', 'h'])
+					if (src[f] !== undefined) kf[f] = src[f]
 				return kf
 			}
-			const keys = (get) => ({ a: 1, k: fits.map((f, j) => Object.assign({ t: times[j], s: get(f) }, ease(j))) })
+			const keys = (get) => ({
+				a: 1,
+				k: fits.map((f, j) =>
+					Object.assign({ t: times[j], s: get(f) }, ease(j))
+				),
+			})
 			tr.a = { a: 0, k: c }
 			tr.p = keys((f) => f.p)
 			// a turn too small to see (rounding noise in the bake) stays still
 			const r0 = fits.reduce((m, f) => m + f.r, 0) / fits.length
-			const still = fits.every((f, j) => errs[j] + R * (Math.max(...f.s, 0) / 100) * Math.abs(((f.r - r0) * Math.PI) / 180) <= tol)
+			const still = fits.every(
+				(f, j) =>
+					errs[j] +
+						R *
+							(Math.max(...f.s, 0) / 100) *
+							Math.abs(((f.r - r0) * Math.PI) / 180) <=
+					tol
+			)
 			tr.r = still ? { a: 0, k: r0 } : keys((f) => [f.r])
 			if (!stroked) tr.s = keys((f) => f.s)
 			paths.forEach((x) => {
@@ -1599,8 +2151,12 @@ export function recoverRigidMotion(json, opts = {}) {
 	}
 	for (const layers of layerLists(json))
 		for (const L of layers) {
-			const share = (opts.accuracy != null ? opts.accuracy : 0.25) * BUDGET.rigid
-			tol = opts.tolerance != null ? opts.tolerance : share / ctx.get(L).scale
+			const share =
+				(opts.accuracy != null ? opts.accuracy : 0.25) * BUDGET.rigid
+			tol =
+				opts.tolerance != null
+					? opts.tolerance
+					: share / ctx.get(L).scale
 			visit(L.shapes)
 		}
 	return n
@@ -1616,7 +2172,11 @@ const roundDeep = (v, d) => {
 	if (Array.isArray(v)) return v.map((x) => roundDeep(x, d))
 	if (isObj(v)) {
 		const o = {}
-		for (const k in v) o[k] = k === 'c' && typeof v[k] === 'boolean' ? v[k] : roundDeep(v[k], d)
+		for (const k in v)
+			o[k] =
+				k === 'c' && typeof v[k] === 'boolean'
+					? v[k]
+					: roundDeep(v[k], d)
 		return o
 	}
 	return v
@@ -1640,13 +2200,25 @@ export function roundPrecision(json, opts = {}) {
 		// value moving 0.01 with y 128 really swings 1.3; rounded to 0.1 apart it swings 13
 		const gain = (kf) => {
 			if (!kf || kf.h === 1 || !kf.o || !kf.i) return 1
-			const ys = [0, 1, ...asArray(kf.o.y), ...asArray(kf.i.y)].filter((y) => typeof y === 'number')
-			const lo = Math.min(...ys), hi = Math.max(...ys)
-			return Math.max(Math.abs(1 - lo) + Math.abs(lo), Math.abs(1 - hi) + Math.abs(hi))
+			const ys = [0, 1, ...asArray(kf.o.y), ...asArray(kf.i.y)].filter(
+				(y) => typeof y === 'number'
+			)
+			const lo = Math.min(...ys),
+				hi = Math.max(...ys)
+			return Math.max(
+				Math.abs(1 - lo) + Math.abs(lo),
+				Math.abs(1 - hi) + Math.abs(hi)
+			)
 		}
 		p.k.forEach((kf, j) => {
 			const g = Math.max(gain(kf), gain(p.k[j - 1]))
-			if (kf.s !== undefined) kf.s = roundDeep(kf.s, g > 1 + EPS && fixed[kind] == null ? decimalsFor(tolFor(kind) / g) : d)
+			if (kf.s !== undefined)
+				kf.s = roundDeep(
+					kf.s,
+					g > 1 + EPS && fixed[kind] == null
+						? decimalsFor(tolFor(kind) / g)
+						: d
+				)
 			if (kf.e !== undefined) kf.e = roundDeep(kf.e, d)
 			if (kf.to) kf.to = roundDeep(kf.to, dpx)
 			if (kf.ti) kf.ti = roundDeep(kf.ti, dpx)
@@ -1671,9 +2243,17 @@ export function simplifyPaths(json, opts = {}) {
 	const perPoint = new Map() // layer -> has a per-point modifier
 	forEachLayerProp(json, opts, BUDGET.fit, (p, key, owner, tolFor, L) => {
 		if (key !== 'ks' && key !== 'pt') return
-		if (!perPoint.has(L)) perPoint.set(L, /"ty":"(rd|zz|pb|op)"/.test(JSON.stringify(L.shapes || [])))
+		if (!perPoint.has(L))
+			perPoint.set(
+				L,
+				/"ty":"(rd|zz|pb|op)"/.test(JSON.stringify(L.shapes || []))
+			)
 		if (perPoint.get(L)) return
-		if (isAnimated(p)) return void (n += simplifyPathKeys(p.k, tolFor('px') * ANIMATED_PATH_SHARE))
+		if (isAnimated(p))
+			return void (n += simplifyPathKeys(
+				p.k,
+				tolFor('px') * ANIMATED_PATH_SHARE
+			))
 		if (!isObj(p.k) || !Array.isArray(p.k.v)) return
 		const r = simplifyPath(p.k, tolFor('px'))
 		if (!r) return
@@ -1687,16 +2267,27 @@ export function simplifyPaths(json, opts = {}) {
 const ANIMATED_PATH_SHARE = 0.5
 
 function simplifyPathKeys(k, tol) {
-	if (!k.every((kf) => Array.isArray(kf.s) && kf.s.length && kf.s.every((sh) => isObj(sh) && Array.isArray(sh.v)))) return 0
+	if (
+		!k.every(
+			(kf) =>
+				Array.isArray(kf.s) &&
+				kf.s.length &&
+				kf.s.every((sh) => isObj(sh) && Array.isArray(sh.v))
+		)
+	)
+		return 0
 	const shapes = k[0].s.length
 	if (k.some((kf) => kf.s.length !== shapes)) return 0
 	let removed = 0
-	for (let a = 0; a < k.length; ) {
+	for (let a = 0; a < k.length;) {
 		let b = a
 		while (b < k.length - 1 && k[b].h !== 1) b++
 		const run = k.slice(a, b + 1)
 		for (let c = 0; c < shapes; c++) {
-			const r = simplifyPathSet(run.map((kf) => kf.s[c]), tol)
+			const r = simplifyPathSet(
+				run.map((kf) => kf.s[c]),
+				tol
+			)
 			if (!r) continue
 			run.forEach((kf, j) => (kf.s[c] = r.shapes[j]))
 			removed += r.removed * run.length
@@ -1731,11 +2322,27 @@ export function instanceLayers(json, opts = {}) {
 		return id
 	}
 	for (const layers of layerLists(json)) {
-		const parents = new Set(layers.map((L) => L.parent).filter((v) => v != null))
+		const parents = new Set(
+			layers.map((L) => L.parent).filter((v) => v != null)
+		)
 		const groups = new Map()
 		layers.forEach((L, i) => {
-			if (L.ty !== 4 || L.td || L.tp != null || L.ddd === 1 || L.ao === 1 || parents.has(L.ind)) return
-			const key = JSON.stringify({ shapes: L.shapes, ip: L.ip, op: L.op, st: L.st, sr: L.sr })
+			if (
+				L.ty !== 4 ||
+				L.td ||
+				L.tp != null ||
+				L.ddd === 1 ||
+				L.ao === 1 ||
+				parents.has(L.ind)
+			)
+				return
+			const key = JSON.stringify({
+				shapes: L.shapes,
+				ip: L.ip,
+				op: L.op,
+				st: L.st,
+				sr: L.sr,
+			})
 			if (key.length < minBytes || key.indexOf('"x":"') >= 0) return
 			if (!groups.has(key)) groups.set(key, [])
 			groups.get(key).push(i)
@@ -1761,9 +2368,36 @@ export function instanceLayers(json, opts = {}) {
 				const L = layers[i]
 				const ks = Object.assign({}, L.ks)
 				ks.a = shiftAnchor(ks.a, pad)
-				const outer = { ty: 0, refId: id, w: 2 * pad, h: 2 * pad, ind: L.ind, ip: L.ip, op: L.op, st: 0, sr: 1, ks }
-				for (const f of ['nm', 'parent', 'bm', 'hd', 'tt', 'ef', 'hasMask']) if (L[f] !== undefined) outer[f] = L[f]
-				if (L.masksProperties) outer.masksProperties = L.masksProperties.map((m) => (m.pt ? Object.assign({}, m, { pt: shiftMaskPath(m.pt, pad) }) : m))
+				const outer = {
+					ty: 0,
+					refId: id,
+					w: 2 * pad,
+					h: 2 * pad,
+					ind: L.ind,
+					ip: L.ip,
+					op: L.op,
+					st: 0,
+					sr: 1,
+					ks,
+				}
+				for (const f of [
+					'nm',
+					'parent',
+					'bm',
+					'hd',
+					'tt',
+					'ef',
+					'hasMask',
+				])
+					if (L[f] !== undefined) outer[f] = L[f]
+				if (L.masksProperties)
+					outer.masksProperties = L.masksProperties.map((m) =>
+						m.pt
+							? Object.assign({}, m, {
+									pt: shiftMaskPath(m.pt, pad),
+								})
+							: m
+					)
 				layers[i] = outer
 			}
 			n += idx.length - 1
@@ -1774,9 +2408,23 @@ export function instanceLayers(json, opts = {}) {
 
 // Mask paths move into the precomp layer's space, which sits pad up and left.
 function shiftMaskPath(pt, pad) {
-	const one = (sh) => (sh && sh.v ? Object.assign({}, sh, { v: sh.v.map((q) => [q[0] + pad, q[1] + pad]) }) : sh)
+	const one = (sh) =>
+		sh && sh.v
+			? Object.assign({}, sh, {
+					v: sh.v.map((q) => [q[0] + pad, q[1] + pad]),
+				})
+			: sh
 	if (!isAnimated(pt)) return Object.assign({}, pt, { k: one(pt.k) })
-	return Object.assign({}, pt, { k: pt.k.map((kf) => Object.assign({}, kf, kf.s ? { s: kf.s.map(one) } : {}, kf.e ? { e: kf.e.map(one) } : {})) })
+	return Object.assign({}, pt, {
+		k: pt.k.map((kf) =>
+			Object.assign(
+				{},
+				kf,
+				kf.s ? { s: kf.s.map(one) } : {},
+				kf.e ? { e: kf.e.map(one) } : {}
+			)
+		),
+	})
 }
 
 function shiftAnchor(a, pad) {
@@ -1789,7 +2437,14 @@ function shiftAnchor(a, pad) {
 	if (!a) return { a: 0, k: [pad, pad, 0] }
 	if (!isAnimated(a)) return Object.assign({}, a, { k: add(a.k) })
 	return Object.assign({}, a, {
-		k: a.k.map((kf) => Object.assign({}, kf, kf.s ? { s: add(kf.s) } : {}, kf.e ? { e: add(kf.e) } : {})),
+		k: a.k.map((kf) =>
+			Object.assign(
+				{},
+				kf,
+				kf.s ? { s: add(kf.s) } : {},
+				kf.e ? { e: add(kf.e) } : {}
+			)
+		),
 	})
 }
 
@@ -1818,7 +2473,8 @@ export function formatNumber(v, exponent) {
 
 // JSON.stringify, but numbers go through formatNumber.
 export function serialise(json, { pretty = false, exponent = false } = {}) {
-	if (!exponent) return pretty ? JSON.stringify(json, null, 2) : JSON.stringify(json)
+	if (!exponent)
+		return pretty ? JSON.stringify(json, null, 2) : JSON.stringify(json)
 	const nl = pretty ? '\n' : ''
 	const out = (v, ind) => {
 		if (typeof v === 'number') return formatNumber(v, true)
@@ -1826,12 +2482,30 @@ export function serialise(json, { pretty = false, exponent = false } = {}) {
 		const inner = pretty ? ind + '  ' : ''
 		if (Array.isArray(v)) {
 			if (!v.length) return '[]'
-			return '[' + nl + v.map((x) => inner + out(x === undefined ? null : x, inner)).join(',' + nl) + nl + ind + ']'
+			return (
+				'[' +
+				nl +
+				v
+					.map((x) => inner + out(x === undefined ? null : x, inner))
+					.join(',' + nl) +
+				nl +
+				ind +
+				']'
+			)
 		}
 		const keys = Object.keys(v).filter((k) => v[k] !== undefined)
 		if (!keys.length) return '{}'
 		const sep = pretty ? ': ' : ':'
-		return '{' + nl + keys.map((k) => inner + JSON.stringify(k) + sep + out(v[k], inner)).join(',' + nl) + nl + ind + '}'
+		return (
+			'{' +
+			nl +
+			keys
+				.map((k) => inner + JSON.stringify(k) + sep + out(v[k], inner))
+				.join(',' + nl) +
+			nl +
+			ind +
+			'}'
+		)
 	}
 	return out(json, '')
 }
@@ -1840,20 +2514,30 @@ export function serialise(json, { pretty = false, exponent = false } = {}) {
 function groupTransform(ks) {
 	const flat2 = (p, def) => {
 		if (!p) return { a: 0, k: def }
-		const cut = (v) => (Array.isArray(v) && v.length > 2 ? v.slice(0, 2) : v)
+		const cut = (v) =>
+			Array.isArray(v) && v.length > 2 ? v.slice(0, 2) : v
 		if (!isAnimated(p)) return { a: 0, k: cut(p.k) }
 		return {
 			a: 1,
 			k: p.k.map((kf) => {
 				const o = Object.assign({}, kf)
-				for (const f of ['s', 'e', 'to', 'ti']) if (o[f]) o[f] = cut(o[f])
+				for (const f of ['s', 'e', 'to', 'ti'])
+					if (o[f]) o[f] = cut(o[f])
 				return o
 			}),
 		}
 	}
 	let pos = ks.p
-	if (pos && pos.s) pos = { a: 0, k: [asArray(pos.x.k)[0], asArray(pos.y.k)[0]] } // only static split positions get here
-	const tr = { ty: 'tr', p: flat2(pos, [0, 0]), a: flat2(ks.a, [0, 0]), s: flat2(ks.s, [100, 100]), r: ks.r || { a: 0, k: 0 }, o: ks.o || { a: 0, k: 100 } }
+	if (pos && pos.s)
+		pos = { a: 0, k: [asArray(pos.x.k)[0], asArray(pos.y.k)[0]] } // only static split positions get here
+	const tr = {
+		ty: 'tr',
+		p: flat2(pos, [0, 0]),
+		a: flat2(ks.a, [0, 0]),
+		s: flat2(ks.s, [100, 100]),
+		r: ks.r || { a: 0, k: 0 },
+		o: ks.o || { a: 0, k: 100 },
+	}
 	if (ks.sk) tr.sk = ks.sk
 	if (ks.sa) tr.sa = ks.sa
 	return tr
@@ -1870,34 +2554,77 @@ export function mergeShapeLayers(json) {
 	let n = 0
 	const paints = (items) => {
 		let c = 0
-		const walk = (its) => (its || []).forEach((it) => (it.ty === 'gr' ? walk(it.it) : ['fl', 'st', 'gf', 'gs'].includes(it.ty) && c++))
+		const walk = (its) =>
+			(its || []).forEach((it) =>
+				it.ty === 'gr'
+					? walk(it.it)
+					: ['fl', 'st', 'gf', 'gs'].includes(it.ty) && c++
+			)
 		walk(items)
 		return c
 	}
 	for (const layers of layerLists(json)) {
-		const parents = new Set(layers.map((l) => l.parent).filter((p) => p != null))
+		const parents = new Set(
+			layers.map((l) => l.parent).filter((p) => p != null)
+		)
 		const ok = (l) => {
-			if (l.ty !== 4 || parents.has(l.ind) || l.tt || l.td || l.tp || l.masksProperties || l.ef || l.bm || l.hd || l.ddd || l.ao) return false
+			if (
+				l.ty !== 4 ||
+				parents.has(l.ind) ||
+				l.tt ||
+				l.td ||
+				l.tp ||
+				l.masksProperties ||
+				l.ef ||
+				l.bm ||
+				l.hd ||
+				l.ddd ||
+				l.ao
+			)
+				return false
 			const ks = l.ks || {}
-			if (ks.p && ks.p.s && (isAnimated(ks.p.x) || isAnimated(ks.p.y))) return false
+			if (ks.p && ks.p.s && (isAnimated(ks.p.x) || isAnimated(ks.p.y)))
+				return false
 			if (ks.rx || ks.ry || ks.or) return false
 			const o = ks.o
-			const full = !o || (!isAnimated(o) && Math.abs(asArray(o.k)[0] - 100) < EPS)
+			const full =
+				!o || (!isAnimated(o) && Math.abs(asArray(o.k)[0] - 100) < EPS)
 			return full || paints(l.shapes) <= 1
 		}
-		const same = (a, b) => a.parent === b.parent && a.ip === b.ip && a.op === b.op && (a.st || 0) === (b.st || 0) && (a.sr || 1) === (b.sr || 1)
+		const same = (a, b) =>
+			a.parent === b.parent &&
+			a.ip === b.ip &&
+			a.op === b.op &&
+			(a.st || 0) === (b.st || 0) &&
+			(a.sr || 1) === (b.sr || 1)
 		const out = []
-		for (let i = 0; i < layers.length; ) {
+		for (let i = 0; i < layers.length;) {
 			let j = i + 1
-			if (ok(layers[i])) while (j < layers.length && ok(layers[j]) && same(layers[i], layers[j])) j++
+			if (ok(layers[i]))
+				while (
+					j < layers.length &&
+					ok(layers[j]) &&
+					same(layers[i], layers[j])
+				)
+					j++
 			if (j - i < 2) {
 				out.push(layers[i++])
 				continue
 			}
 			const run = layers.slice(i, j)
 			const merged = Object.assign({}, run[0], {
-				ks: { o: { a: 0, k: 100 }, r: { a: 0, k: 0 }, p: { a: 0, k: [0, 0, 0] }, a: { a: 0, k: [0, 0, 0] }, s: { a: 0, k: [100, 100, 100] } },
-				shapes: run.map((l) => ({ ty: 'gr', nm: l.nm, it: (l.shapes || []).concat([groupTransform(l.ks || {})]) })),
+				ks: {
+					o: { a: 0, k: 100 },
+					r: { a: 0, k: 0 },
+					p: { a: 0, k: [0, 0, 0] },
+					a: { a: 0, k: [0, 0, 0] },
+					s: { a: 0, k: [100, 100, 100] },
+				},
+				shapes: run.map((l) => ({
+					ty: 'gr',
+					nm: l.nm,
+					it: (l.shapes || []).concat([groupTransform(l.ks || {})]),
+				})),
 			})
 			out.push(merged)
 			n += run.length - 1
@@ -1913,12 +2640,27 @@ export function mergeShapeLayers(json) {
 // null when something can't be bounded.
 function itemsBounds(items) {
 	let b = null
-	const grow = (x, y) => (b = b ? [Math.min(b[0], x), Math.min(b[1], y), Math.max(b[2], x), Math.max(b[3], y)] : [x, y, x, y])
-	const values = (p) => (!p ? [] : isAnimated(p) ? p.k.map((k) => k.s).filter((v) => v !== undefined) : [p.k])
+	const grow = (x, y) =>
+		(b = b
+			? [
+					Math.min(b[0], x),
+					Math.min(b[1], y),
+					Math.max(b[2], x),
+					Math.max(b[3], y),
+				]
+			: [x, y, x, y])
+	const values = (p) =>
+		!p
+			? []
+			: isAnimated(p)
+				? p.k.map((k) => k.s).filter((v) => v !== undefined)
+				: [p.k]
 	let pad = 0
 	for (const it of items) {
 		if (it.ty === 'gr') {
-			const inner = itemsBounds((it.it || []).filter((x) => x.ty !== 'tr')) // path-only groups have identity transforms
+			const inner = itemsBounds(
+				(it.it || []).filter((x) => x.ty !== 'tr')
+			) // path-only groups have identity transforms
 			if (!inner) return null
 			grow(inner[0], inner[1])
 			grow(inner[2], inner[3])
@@ -1933,10 +2675,14 @@ function itemsBounds(items) {
 					})
 				}
 		} else if (it.ty === 'rc' || it.ty === 'el') {
-			for (const c of values(it.p)) for (const sz of values(it.s)) grow(c[0] - sz[0] / 2, c[1] - sz[1] / 2), grow(c[0] + sz[0] / 2, c[1] + sz[1] / 2)
+			for (const c of values(it.p))
+				for (const sz of values(it.s))
+					(grow(c[0] - sz[0] / 2, c[1] - sz[1] / 2),
+						grow(c[0] + sz[0] / 2, c[1] + sz[1] / 2))
 		} else if (it.ty === 'sr') {
 			const r = Math.max(...values(it.or).map((v) => asArray(v)[0]))
-			for (const c of values(it.p)) grow(c[0] - r, c[1] - r), grow(c[0] + r, c[1] + r)
+			for (const c of values(it.p))
+				(grow(c[0] - r, c[1] - r), grow(c[0] + r, c[1] + r))
 		} else if (it.ty === 'st' || it.ty === 'gs') {
 			const w = Math.max(...values(it.w).map((v) => asArray(v)[0]))
 			pad = Math.max(pad, (w / 2) * Math.max(it.ml || 4, 1)) // miter joins reach furthest
@@ -1949,7 +2695,12 @@ const PATH_ITEMS = ['sh', 'rc', 'el', 'sr']
 const PAINT_ITEMS = ['fl', 'st', 'gf', 'gs']
 // A path, or a group holding only paths under an identity transform (Cavalry nests them).
 const isPathItem = (x) =>
-	PATH_ITEMS.includes(x.ty) || (x.ty === 'gr' && !x.hd && !x.bm && Array.isArray(x.it) && x.it.every((y) => (y.ty === 'tr' ? identityTr(y) : isPathItem(y))))
+	PATH_ITEMS.includes(x.ty) ||
+	(x.ty === 'gr' &&
+		!x.hd &&
+		!x.bm &&
+		Array.isArray(x.it) &&
+		x.it.every((y) => (y.ty === 'tr' ? identityTr(y) : isPathItem(y))))
 
 // Cavalry's writer puts a shape's fills and strokes both inside the group holding its
 // path and again on the group around it, so every path is painted twice: double the paint
@@ -1960,23 +2711,50 @@ export function removeDoubledPaints(json) {
 	let n = 0
 	const DOUBLED = PAINT_ITEMS.concat(['tm']) // trims are doubled too, and a second trim shortens the path again
 	const strip = (items) => items.map(({ nm, mn, ix, cix, ...rest }) => rest)
-	const bare = (x) => JSON.stringify(x, (k, v) => (['nm', 'mn', 'ix', 'cix', 'np'].includes(k) ? undefined : v))
+	const bare = (x) =>
+		JSON.stringify(x, (k, v) =>
+			['nm', 'mn', 'ix', 'cix', 'np'].includes(k) ? undefined : v
+		)
 	// items: a layer's shape list or a group's; returns it without doubled paints
 	const visit = (items) => {
 		if (!Array.isArray(items)) return items
 		for (const g of items) if (g && g.ty === 'gr') g.it = visit(g.it)
 		// the writer also repeats a trimmed stroke's whole group; once the copies match, keep one
-		items = items.filter((x, i) => !(i > 0 && x.ty === 'gr' && items[i - 1].ty === 'gr' && bare(x) === bare(items[i - 1]) && ++n))
+		items = items.filter(
+			(x, i) =>
+				!(
+					i > 0 &&
+					x.ty === 'gr' &&
+					items[i - 1].ty === 'gr' &&
+					bare(x) === bare(items[i - 1]) &&
+					++n
+				)
+		)
 		const inner = items.filter((x) => x.ty === 'gr')
 		const outerPaints = items.filter((x) => DOUBLED.includes(x.ty))
-		if (inner.length !== 1 || !outerPaints.length || items.indexOf(inner[0]) !== 0) return items
-		if (inner.length + outerPaints.length + (items.some((x) => x.ty === 'tr') ? 1 : 0) !== items.length) return items
-		const innerPaints = (inner[0].it || []).filter((x) => DOUBLED.includes(x.ty))
+		if (
+			inner.length !== 1 ||
+			!outerPaints.length ||
+			items.indexOf(inner[0]) !== 0
+		)
+			return items
+		if (
+			inner.length +
+				outerPaints.length +
+				(items.some((x) => x.ty === 'tr') ? 1 : 0) !==
+			items.length
+		)
+			return items
+		const innerPaints = (inner[0].it || []).filter((x) =>
+			DOUBLED.includes(x.ty)
+		)
 		if (!deepEqual(strip(innerPaints), strip(outerPaints))) return items
 		n += outerPaints.length
 		return items.filter((x) => !outerPaints.includes(x))
 	}
-	for (const layers of layerLists(json)) for (const L of layers) if (Array.isArray(L.shapes)) L.shapes = visit(L.shapes)
+	for (const layers of layerLists(json))
+		for (const L of layers)
+			if (Array.isArray(L.shapes)) L.shapes = visit(L.shapes)
 	return n
 }
 
@@ -1995,35 +2773,61 @@ export function mergeShapeGroups(json) {
 		const paths = g.it.filter(isPathItem)
 		const paints = g.it.filter((x) => PAINT_ITEMS.includes(x.ty))
 		const tr = g.it.find((x) => x.ty === 'tr')
-		if (!paths.length || !paints.length || paths.length + paints.length + (tr ? 1 : 0) !== g.it.length) return null
+		if (
+			!paths.length ||
+			!paints.length ||
+			paths.length + paints.length + (tr ? 1 : 0) !== g.it.length
+		)
+			return null
 		// every path must come before every paint (paints apply to the paths above them)
 		const lastPath = Math.max(...paths.map((x) => g.it.indexOf(x)))
 		if (paints.some((x) => g.it.indexOf(x) < lastPath)) return null
-		if (paths.some((x) => x.hd) || paints.some((x) => x.hd || x.d)) return null // dashes restart per path
+		if (paths.some((x) => x.hd) || paints.some((x) => x.hd || x.d))
+			return null // dashes restart per path
 		return { paths, paints, tr, box: itemsBounds(g.it) }
 	}
 	const strip = (items) => items.map(({ nm, mn, ix, cix, ...rest }) => rest)
-	const stripDeep = (items) => items.map(({ nm, mn, ix, cix, np, ...rest }) => (rest.it ? Object.assign(rest, { it: stripDeep(rest.it) }) : rest))
-	const overlaps = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+	const stripDeep = (items) =>
+		items.map(({ nm, mn, ix, cix, np, ...rest }) =>
+			rest.it ? Object.assign(rest, { it: stripDeep(rest.it) }) : rest
+		)
+	const overlaps = (a, b) =>
+		a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
 	const visit = (items) => {
 		if (!Array.isArray(items)) return
 		for (const it of items) if (it && it.ty === 'gr') visit(it.it)
-		for (let i = 0; i < items.length - 1; ) {
-			const a = style(items[i]), b = a && style(items[i + 1])
-			const sameTr = b && deepEqual(a.tr ? strip([a.tr]) : null, b.tr ? strip([b.tr]) : null)
-			const samePaths = sameTr && deepEqual(stripDeep(a.paths), stripDeep(b.paths))
-			const sharePaint = sameTr && !samePaths && a.box && b.box && !overlaps(a.box, b.box) && deepEqual(strip(a.paints), strip(b.paints))
+		for (let i = 0; i < items.length - 1;) {
+			const a = style(items[i]),
+				b = a && style(items[i + 1])
+			const sameTr =
+				b &&
+				deepEqual(
+					a.tr ? strip([a.tr]) : null,
+					b.tr ? strip([b.tr]) : null
+				)
+			const samePaths =
+				sameTr && deepEqual(stripDeep(a.paths), stripDeep(b.paths))
+			const sharePaint =
+				sameTr &&
+				!samePaths &&
+				a.box &&
+				b.box &&
+				!overlaps(a.box, b.box) &&
+				deepEqual(strip(a.paints), strip(b.paints))
 			if (!samePaths && !sharePaint) {
 				i++
 				continue
 			}
 			const g = items[i]
-			g.it = samePaths ? a.paths.concat(a.paints, b.paints, a.tr ? [a.tr] : []) : a.paths.concat(b.paths, a.paints, a.tr ? [a.tr] : [])
+			g.it = samePaths
+				? a.paths.concat(a.paints, b.paints, a.tr ? [a.tr] : [])
+				: a.paths.concat(b.paths, a.paints, a.tr ? [a.tr] : [])
 			items.splice(i + 1, 1)
 			n++ // stay on i: the merged group may take the next one too
 		}
 	}
-	for (const layers of layerLists(json)) for (const L of layers) visit(L.shapes)
+	for (const layers of layerLists(json))
+		for (const L of layers) visit(L.shapes)
 	return n
 }
 // Share geometry across shape groups: when multiple groups within a shape layer hold
@@ -2038,10 +2842,18 @@ export function shareSameShape(json, opts = {}) {
 	const pad = 2 * Math.max(json.w || 0, json.h || 0, 1000)
 	let n = 0
 	const assets = json.assets || []
-	let nextAssetId = Math.max(0, ...assets.map((a) => Number(String(a.id).replace(/\D/g, '')) || 0))
+	let nextAssetId = Math.max(
+		0,
+		...assets.map((a) => Number(String(a.id).replace(/\D/g, '')) || 0)
+	)
 	// Ref layers need an ind above every existing layer ind (Lottie top-of-stack);
 	// each new ref gets the next free one.
-	const maxInd = Math.max(0, ...layerLists(json).flat().map((L) => L.ind || 0))
+	const maxInd = Math.max(
+		0,
+		...layerLists(json)
+			.flat()
+			.map((L) => L.ind || 0)
+	)
 	let refInd = maxInd
 	const nextLayerInd = () => ++refInd
 	const ids = new Set(assets.map((a) => a.id))
@@ -2066,7 +2878,10 @@ export function shareSameShape(json, opts = {}) {
 		pts.reduce((s, p) => s + p[1], 0) / pts.length,
 	]
 	const normalise = (pts, c) => pts.map((p) => [p[0] - c[0], p[1] - c[1]])
-	const roundPt = (p) => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10]
+	const roundPt = (p) => [
+		Math.round(p[0] * 10) / 10,
+		Math.round(p[1] * 10) / 10,
+	]
 	const fingerprint = (shapeNode, paintNodes) => {
 		if (!shapeNode || !shapeNode.ks || shapeNode.ks.a === 1) return null
 		const k = shapeNode.ks.k
@@ -2077,7 +2892,13 @@ export function shareSameShape(json, opts = {}) {
 		const v = normalise(k.v, c).map(roundPt)
 		const i = k.i ? k.i.map(roundPt) : []
 		const o = k.o ? k.o.map(roundPt) : []
-		return JSON.stringify({ v, i, o, c: k.c, fill: paintNodes.map((p) => JSON.stringify(p)) })
+		return JSON.stringify({
+			v,
+			i,
+			o,
+			c: k.c,
+			fill: paintNodes.map((p) => JSON.stringify(p)),
+		})
 	}
 
 	// Walk all groups in a layer's shapes tree. `acc` is the accumulated STATIC transform of
@@ -2094,25 +2915,59 @@ export function shareSameShape(json, opts = {}) {
 		const constArr = (p) => {
 			if (!p) return null
 			if (!p.a && Array.isArray(p.k)) return p.k
-			if (p.a && Array.isArray(p.k) && p.k.length && p.k.every((kf) => Array.isArray(kf.s) && kf.s.length === p.k[0].s.length && kf.s.every((v, i) => v === p.k[0].s[i]))) return p.k[0].s
+			if (
+				p.a &&
+				Array.isArray(p.k) &&
+				p.k.length &&
+				p.k.every(
+					(kf) =>
+						Array.isArray(kf.s) &&
+						kf.s.length === p.k[0].s.length &&
+						kf.s.every((v, i) => v === p.k[0].s[i])
+				)
+			)
+				return p.k[0].s
 			return null
 		}
 		const constNum = (p) => {
 			if (!p) return null
 			if (!p.a) {
 				if (typeof p.k === 'number') return p.k
-				if (Array.isArray(p.k) && p.k.length === 1 && typeof p.k[0] === 'number') return p.k[0]
+				if (
+					Array.isArray(p.k) &&
+					p.k.length === 1 &&
+					typeof p.k[0] === 'number'
+				)
+					return p.k[0]
 				return null
 			}
-			if (Array.isArray(p.k) && p.k.length && p.k.every((kf) => typeof kf.s === 'number' && kf.s === p.k[0].s)) return p.k[0].s
+			if (
+				Array.isArray(p.k) &&
+				p.k.length &&
+				p.k.every((kf) => typeof kf.s === 'number' && kf.s === p.k[0].s)
+			)
+				return p.k[0].s
 			return null
 		}
 		const pos = constArr(tr.p)
 		const anc = constArr(tr.a)
 		const s = constArr(tr.s)
 		const r = constNum(tr.r)
-		if ((tr.p && !pos) || (tr.a && !anc) || (tr.s && !s) || (tr.r && r == null)) return null
-		return { x: pos ? pos[0] : 0, y: pos ? pos[1] : 0, ax: anc ? anc[0] : 0, ay: anc ? anc[1] : 0, s: s || [100, 100], r: r || 0 }
+		if (
+			(tr.p && !pos) ||
+			(tr.a && !anc) ||
+			(tr.s && !s) ||
+			(tr.r && r == null)
+		)
+			return null
+		return {
+			x: pos ? pos[0] : 0,
+			y: pos ? pos[1] : 0,
+			ax: anc ? anc[0] : 0,
+			ay: anc ? anc[1] : 0,
+			s: s || [100, 100],
+			r: r || 0,
+		}
 	}
 	const composeAcc = (a, t) => {
 		// child transform then ancestor: Lottie group applies ancestor first, so
@@ -2145,8 +3000,10 @@ export function shareSameShape(json, opts = {}) {
 	const anchorZero = (g) => {
 		const tr = g.it.find((x) => x.ty === 'tr')
 		if (!tr) return null
-		const pos = tr.p && !tr.p.a && Array.isArray(tr.p.k) ? tr.p.k.slice(0, 2) : null
-		const anc = tr.a && !tr.a.a && Array.isArray(tr.a.k) ? tr.a.k.slice(0, 2) : null
+		const pos =
+			tr.p && !tr.p.a && Array.isArray(tr.p.k) ? tr.p.k.slice(0, 2) : null
+		const anc =
+			tr.a && !tr.a.a && Array.isArray(tr.a.k) ? tr.a.k.slice(0, 2) : null
 		if (pos && anc && pos[0] === anc[0] && pos[1] === anc[1]) {
 			tr.p = { a: 0, k: [0, 0] }
 			tr.a = { a: 0, k: [0, 0] }
@@ -2172,7 +3029,8 @@ export function shareSameShape(json, opts = {}) {
 	// the group's tr.p has been zeroed by then. s/r/o/sk come from the copy's tr.
 	const refTransform = (g, capturedPos, acc) => {
 		const tr = g.it.find((x) => x.ty === 'tr') || {}
-		const prop = (k) => (tr[k] && tr[k].k != null ? JSON.parse(JSON.stringify(tr[k])) : null)
+		const prop = (k) =>
+			tr[k] && tr[k].k != null ? JSON.parse(JSON.stringify(tr[k])) : null
 		// Ref position = the copy's own baked position + every ancestor group's static
 		// translation (the master draws under that chain; the ref layer replaces the
 		// whole subtree, so the chain must be folded in). Scale/rotation ancestors are
@@ -2186,7 +3044,17 @@ export function shareSameShape(json, opts = {}) {
 			const pp = tr.p
 			if (pp && Array.isArray(pp.k)) {
 				if (!pp.a) own = pp.k.slice(0, 2)
-				else if (pp.k.length && Array.isArray(pp.k[0].s) && pp.k.every((kf) => Array.isArray(kf.s) && kf.s[0] === pp.k[0].s[0] && kf.s[1] === pp.k[0].s[1])) own = pp.k[0].s.slice(0, 2)
+				else if (
+					pp.k.length &&
+					Array.isArray(pp.k[0].s) &&
+					pp.k.every(
+						(kf) =>
+							Array.isArray(kf.s) &&
+							kf.s[0] === pp.k[0].s[0] &&
+							kf.s[1] === pp.k[0].s[1]
+					)
+				)
+					own = pp.k[0].s.slice(0, 2)
 			}
 		}
 		own = own || [0, 0]
@@ -2226,7 +3094,11 @@ export function shareSameShape(json, opts = {}) {
 			// interpolator never runs, and Cavalry's writer omits h there).
 			const hold = k.length && k.slice(0, -1).every((x) => x.h === 1)
 			if (!hold) return null
-			oSig = 'k:' + JSON.stringify(k.map((x) => [x.t, Array.isArray(x.s) ? x.s[0] : x.s]))
+			oSig =
+				'k:' +
+				JSON.stringify(
+					k.map((x) => [x.t, Array.isArray(x.s) ? x.s[0] : x.s])
+				)
 		}
 		const geo = fingerprint(shapeNode, [])
 		return geo ? geo + '|' + JSON.stringify(p.c) + '|' + oSig : null
@@ -2247,17 +3119,30 @@ export function shareSameShape(json, opts = {}) {
 		if (paints.length !== 1) continue
 		// content position inside the asset: inner layer p minus anchor; only static,
 		// anchor-free inner layers are reusable (anything else shifts unpredictably)
-		if (!il.ks || !il.ks.p || il.ks.p.a !== 0 || !Array.isArray(il.ks.p.k)) continue
-		if (il.ks.a && (il.ks.a.a !== 0 || il.ks.a.k[0] !== 0 || il.ks.a.k[1] !== 0)) continue
+		if (!il.ks || !il.ks.p || il.ks.p.a !== 0 || !Array.isArray(il.ks.p.k))
+			continue
+		if (
+			il.ks.a &&
+			(il.ks.a.a !== 0 || il.ks.a.k[0] !== 0 || il.ks.a.k[1] !== 0)
+		)
+			continue
 		const sig = existingSig(sh, paints)
 		if (!sig || existingIndex.has(sig)) continue
-		existingIndex.set(sig, { refId: a.id, w: a.w, h: a.h, centre: [il.ks.p.k[0], il.ks.p.k[1]], ip: il.ip, op: il.op })
+		existingIndex.set(sig, {
+			refId: a.id,
+			w: a.w,
+			h: a.h,
+			centre: [il.ks.p.k[0], il.ks.p.k[1]],
+			ip: il.ip,
+			op: il.op,
+		})
 	}
 
 	// Asset inner layers must be skipped: demoting an asset's own inner group onto
 	// that same asset empties it (every ref to it then draws nothing).
 	const assetLayerSet = new Set()
-	for (const a of assets) for (const il of a.layers || []) assetLayerSet.add(il)
+	for (const a of assets)
+		for (const il of a.layers || []) assetLayerSet.add(il)
 
 	for (const layers of layerLists(json)) {
 		for (const layer of layers) {
@@ -2266,7 +3151,12 @@ export function shareSameShape(json, opts = {}) {
 
 			// Collect all shape groups with their accumulated ancestor transform
 			const groups = []
-			collectGroups(layer.shapes, groups, { x: 0, y: 0, s: [100, 100], r: 0 })
+			collectGroups(layer.shapes, groups, {
+				x: 0,
+				y: 0,
+				s: [100, 100],
+				r: 0,
+			})
 
 			// Group by (geometry, paint) fingerprint, recording each copy's baked position
 			const byFp = new Map()
@@ -2281,11 +3171,24 @@ export function shareSameShape(json, opts = {}) {
 				const s = shapes[0]
 				// skip groups already inside a reused asset's own layer tree
 				const es = existingSig(s, paints)
-				if (es && existingIndex.has(es)) { reuseJobs.push({ g: g.g, pos: anchorZero(g.g), acc: g.acc, reuse: existingIndex.get(es) }); continue }
+				if (es && existingIndex.has(es)) {
+					reuseJobs.push({
+						g: g.g,
+						pos: anchorZero(g.g),
+						acc: g.acc,
+						reuse: existingIndex.get(es),
+					})
+					continue
+				}
 				const fp = fingerprint(s, paints)
 				if (!fp) continue
 				if (!byFp.has(fp)) byFp.set(fp, [])
-				byFp.get(fp).push({ g: g.g, shape: s, pos: anchorZero(g.g), acc: g.acc })
+				byFp.get(fp).push({
+					g: g.g,
+					shape: s,
+					pos: anchorZero(g.g),
+					acc: g.acc,
+				})
 			}
 
 			// Demote groups onto their existing precomp asset. The asset's inner layer
@@ -2293,9 +3196,10 @@ export function shareSameShape(json, opts = {}) {
 			// ancestor translation inside the root group (root.p offsets everything):
 			// ref.p = root.p + cell + acc − centre.
 			{
-				const rootTr = layer.shapes[0] && layer.shapes[0].ty === 'gr'
-					? staticTr(layer.shapes[0])
-					: null
+				const rootTr =
+					layer.shapes[0] && layer.shapes[0].ty === 'gr'
+						? staticTr(layer.shapes[0])
+						: null
 				const rootP = rootTr ? { x: rootTr.x, y: rootTr.y } : null
 				if (rootP) {
 					for (const job of reuseJobs) {
@@ -2325,7 +3229,14 @@ export function shareSameShape(json, opts = {}) {
 								// (collectGroups folds the ancestor chain down from the
 								// layer), so the absolute position is cell + acc; adding
 								// rootP as well double-counts the root offset.
-								p: { a: 0, k: [cell[0] + job.acc.x - r.centre[0], cell[1] + job.acc.y - r.centre[1], 0] },
+								p: {
+									a: 0,
+									k: [
+										cell[0] + job.acc.x - r.centre[0],
+										cell[1] + job.acc.y - r.centre[1],
+										0,
+									],
+								},
 								s: { a: 0, k: [100, 100, 100] },
 								r: { a: 0, k: 0 },
 								o: { a: 0, k: 100 },
@@ -2347,7 +3258,9 @@ export function shareSameShape(json, opts = {}) {
 				const masterGroup = master.g
 
 				// Extract paints and transform from master group
-				const paints = masterGroup.it.filter((x) => PAINT_ITEMS.includes(x.ty))
+				const paints = masterGroup.it.filter((x) =>
+					PAINT_ITEMS.includes(x.ty)
+				)
 				const tr = masterGroup.it.find((x) => x.ty === 'tr')
 
 				// Build precomp asset: one copy of the shared (geometry, paint), with the
@@ -2359,7 +3272,10 @@ export function shareSameShape(json, opts = {}) {
 				const c = centroid(mk.v)
 				mk.v = mk.v.map((p) => [p[0] - c[0], p[1] - c[1]])
 				// tangents are deltas — they survive the re-centre unchanged
-				const innerItems = [innerShape, ...JSON.parse(JSON.stringify(paints))]
+				const innerItems = [
+					innerShape,
+					...JSON.parse(JSON.stringify(paints)),
+				]
 				if (tr)
 					innerItems.push({
 						ty: 'tr',
@@ -2381,7 +3297,19 @@ export function shareSameShape(json, opts = {}) {
 					shapes: [{ ty: 'gr', it: innerItems, bm: 1 }],
 				}
 
-				json.assets = [...(json.assets || []), { id: assetId, nm: 'shape', fr: json.fr || 30, w: 2 * pad, h: 2 * pad, ip: layer.ip, op: layer.op, layers: [innerLayer] }]
+				json.assets = [
+					...(json.assets || []),
+					{
+						id: assetId,
+						nm: 'shape',
+						fr: json.fr || 30,
+						w: 2 * pad,
+						h: 2 * pad,
+						ip: layer.ip,
+						op: layer.op,
+						layers: [innerLayer],
+					},
+				]
 
 				// Replace EVERY copy group (master included) with a precomp reference
 				// layer at its own position. Keeping the master in the shape layer
@@ -2427,41 +3355,233 @@ export function shareSameShape(json, opts = {}) {
 	return n
 }
 
-
 // ---------- catalogue + runner ----------
 
 // group: lossless | lossy | assets | output. Order here is the order passes run in: lossy
 // passes come before collapseStatic and friends so those can clean up after them.
 export const PASSES = [
-	{ id: 'healBrokenRefs', label: 'Heal broken refs and bare transforms', group: 'lossless', on: true, run: healBrokenRefs },
-	{ id: 'removeHidden', label: 'Remove hidden layers and shapes', group: 'lossless', on: true, run: removeHidden },
-	{ id: 'removeDeadLayers', label: 'Remove layers that are never visible', group: 'lossless', on: true, run: removeDeadLayers },
-	{ id: 'stripZeroOpacity', label: 'Remove shapes that are 0% opacity at every frame', group: 'lossless', on: true, run: stripZeroOpacity },
-	{ id: 'foldStaticParents', label: 'Fold still group layers into their children', group: 'lossless', on: true, run: foldStaticParents },
-	{ id: 'removeIdentityNulls', label: 'Remove do-nothing null layers', group: 'lossless', on: true, run: removeIdentityNulls },
-	{ id: 'removeUnusedAssets', label: 'Remove unused assets', group: 'lossless', on: true, run: removeUnusedAssets },
-	{ id: 'dedupeAssets', label: 'Merge identical assets', group: 'lossless', on: true, run: dedupeAssets },
-	{ id: 'trimToLayerRange', label: 'Trim keys outside each layer’s time range', group: 'lossless', on: true, run: trimToLayerRange },
-	{ id: 'recoverRigidMotion', label: 'Turn baked moving shapes back into transforms', group: 'lossy', on: true, run: recoverRigidMotion },
-	{ id: 'equalisePathPoints', label: 'Fix paths whose point count changes', group: 'lossless', on: true, run: equalisePathPoints },
-	{ id: 'holdJumps', label: 'Hold one-frame jumps', group: 'lossless', on: true, run: holdJumps, options: { all: false } },
-	{ id: 'binaryWindows', label: 'Turn blinking opacity into visible windows', group: 'lossless', on: true, run: binaryWindows },
-	{ id: 'simplifyKeys', label: 'Fit keyframes with curves', group: 'lossy', on: true, run: simplifyKeys, options: { eased: false } },
-	{ id: 'simplifyPaths', label: 'Simplify paths', group: 'lossy', on: true, run: simplifyPaths },
-	{ id: 'roundPrecision', label: 'Round values (decimals per kind)', group: 'lossy', on: true, run: roundPrecision },
-	{ id: 'instanceLayers', label: 'Share identical layers as one precomp', group: 'lossless', on: true, run: instanceLayers },
-	{ id: 'removeDoubledPaints', label: 'Remove doubled fills and strokes', group: 'lossless', on: true, run: removeDoubledPaints },
-	{ id: 'mergeShapeLayers', label: 'Merge neighbouring shape layers', group: 'lossless', on: true, run: mergeShapeLayers },
-	{ id: 'flattenShapeGroups', label: 'Flatten nested shape groups', group: 'lossless', on: true, run: flattenShapeGroups },
-	{ id: 'mergeShapeGroups', label: 'Share fills and strokes between shapes', group: 'lossless', on: true, run: mergeShapeGroups },
-	{ id: 'shareSameShape', label: 'Share identical shape geometry as precomp', group: 'lossless', on: true, run: shareSameShape },
-	{ id: 'decomposeSharedPaints', label: 'Share colour curves across blink phases', group: 'lossless', on: true, run: decomposeSharedPaints },
-	{ id: 'collapseStatic', label: 'Make unchanging animated properties static', group: 'lossless', on: true, run: collapseStatic },
-	{ id: 'removeRedundantKeys', label: 'Remove keys that change nothing', group: 'lossless', on: true, run: removeRedundantKeys },
-	{ id: 'trimKeyframeFields', label: 'Drop unused keyframe fields', group: 'lossless', on: true, run: trimKeyframeFields },
-	{ id: 'removeDefaults', label: 'Drop default-valued fields', group: 'lossless', on: true, run: removeDefaults },
-	{ id: 'unwrapScalars', label: 'Unwrap one-value arrays', group: 'lossless', on: true, run: unwrapScalars },
-	{ id: 'stripMeta', label: 'Strip metadata', group: 'lossless', on: true, run: stripMeta, options: { names: false, matchNames: true, markers: false, keepEffectMatchNames: false } },
+	{
+		id: 'healBrokenRefs',
+		label: 'Heal broken refs and bare transforms',
+		group: 'lossless',
+		on: true,
+		run: healBrokenRefs,
+	},
+	{
+		id: 'removeHidden',
+		label: 'Remove hidden layers and shapes',
+		group: 'lossless',
+		on: true,
+		run: removeHidden,
+	},
+	{
+		id: 'removeDeadLayers',
+		label: 'Remove layers that are never visible',
+		group: 'lossless',
+		on: true,
+		run: removeDeadLayers,
+	},
+	{
+		id: 'stripZeroOpacity',
+		label: 'Remove shapes that are 0% opacity at every frame',
+		group: 'lossless',
+		on: true,
+		run: stripZeroOpacity,
+	},
+	{
+		id: 'foldStaticParents',
+		label: 'Fold still group layers into their children',
+		group: 'lossless',
+		on: true,
+		run: foldStaticParents,
+	},
+	{
+		id: 'removeIdentityNulls',
+		label: 'Remove do-nothing null layers',
+		group: 'lossless',
+		on: true,
+		run: removeIdentityNulls,
+	},
+	{
+		id: 'removeUnusedAssets',
+		label: 'Remove unused assets',
+		group: 'lossless',
+		on: true,
+		run: removeUnusedAssets,
+	},
+	{
+		id: 'dedupeAssets',
+		label: 'Merge identical assets',
+		group: 'lossless',
+		on: true,
+		run: dedupeAssets,
+	},
+	{
+		id: 'trimToLayerRange',
+		label: 'Trim keys outside each layer’s time range',
+		group: 'lossless',
+		on: true,
+		run: trimToLayerRange,
+	},
+	{
+		id: 'recoverRigidMotion',
+		label: 'Turn baked moving shapes back into transforms',
+		group: 'lossy',
+		on: true,
+		run: recoverRigidMotion,
+	},
+	// Must run AFTER recoverRigidMotion: Cavalry bakes a duplicator's copies as animated
+	// PATHS with static transforms, so before that pass every copy's scale is a flat 100
+	// and there is no shared curve to find. With the transforms recovered, the copies are
+	// one animation sampled at a per-copy time offset, which is what this pass shares.
+	{
+		id: 'shareDuplicatorAnimation',
+		label: 'Share a duplicator’s animation as one precomp',
+		group: 'lossy',
+		on: true,
+		run: shareDuplicatorAnimationPass,
+	},
+	{
+		id: 'equalisePathPoints',
+		label: 'Fix paths whose point count changes',
+		group: 'lossless',
+		on: true,
+		run: equalisePathPoints,
+	},
+	{
+		id: 'holdJumps',
+		label: 'Hold one-frame jumps',
+		group: 'lossless',
+		on: true,
+		run: holdJumps,
+		options: { all: false },
+	},
+	{
+		id: 'binaryWindows',
+		label: 'Turn blinking opacity into visible windows',
+		group: 'lossless',
+		on: true,
+		run: binaryWindows,
+	},
+	{
+		id: 'simplifyKeys',
+		label: 'Fit keyframes with curves',
+		group: 'lossy',
+		on: true,
+		run: simplifyKeys,
+		options: { eased: false },
+	},
+	{
+		id: 'simplifyPaths',
+		label: 'Simplify paths',
+		group: 'lossy',
+		on: true,
+		run: simplifyPaths,
+	},
+	{
+		id: 'roundPrecision',
+		label: 'Round values (decimals per kind)',
+		group: 'lossy',
+		on: true,
+		run: roundPrecision,
+	},
+	{
+		id: 'instanceLayers',
+		label: 'Share identical layers as one precomp',
+		group: 'lossless',
+		on: true,
+		run: instanceLayers,
+	},
+	{
+		id: 'removeDoubledPaints',
+		label: 'Remove doubled fills and strokes',
+		group: 'lossless',
+		on: true,
+		run: removeDoubledPaints,
+	},
+	{
+		id: 'mergeShapeLayers',
+		label: 'Merge neighbouring shape layers',
+		group: 'lossless',
+		on: true,
+		run: mergeShapeLayers,
+	},
+	{
+		id: 'flattenShapeGroups',
+		label: 'Flatten nested shape groups',
+		group: 'lossless',
+		on: true,
+		run: flattenShapeGroups,
+	},
+	{
+		id: 'mergeShapeGroups',
+		label: 'Share fills and strokes between shapes',
+		group: 'lossless',
+		on: true,
+		run: mergeShapeGroups,
+	},
+	{
+		id: 'shareSameShape',
+		label: 'Share identical shape geometry as precomp',
+		group: 'lossless',
+		on: true,
+		run: shareSameShape,
+	},
+	{
+		id: 'decomposeSharedPaints',
+		label: 'Share colour curves across blink phases',
+		group: 'lossless',
+		on: true,
+		run: decomposeSharedPaints,
+	},
+	{
+		id: 'collapseStatic',
+		label: 'Make unchanging animated properties static',
+		group: 'lossless',
+		on: true,
+		run: collapseStatic,
+	},
+	{
+		id: 'removeRedundantKeys',
+		label: 'Remove keys that change nothing',
+		group: 'lossless',
+		on: true,
+		run: removeRedundantKeys,
+	},
+	{
+		id: 'trimKeyframeFields',
+		label: 'Drop unused keyframe fields',
+		group: 'lossless',
+		on: true,
+		run: trimKeyframeFields,
+	},
+	{
+		id: 'removeDefaults',
+		label: 'Drop default-valued fields',
+		group: 'lossless',
+		on: true,
+		run: removeDefaults,
+	},
+	{
+		id: 'unwrapScalars',
+		label: 'Unwrap one-value arrays',
+		group: 'lossless',
+		on: true,
+		run: unwrapScalars,
+	},
+	{
+		id: 'stripMeta',
+		label: 'Strip metadata',
+		group: 'lossless',
+		on: true,
+		run: stripMeta,
+		options: {
+			names: false,
+			matchNames: true,
+			markers: false,
+			keepEffectMatchNames: false,
+		},
+	},
 ]
 
 const clone = (v) => JSON.parse(JSON.stringify(v))
@@ -2474,9 +3594,17 @@ export function optimise(input, settings = {}) {
 	for (const pass of PASSES) {
 		const s = settings[pass.id] !== undefined ? settings[pass.id] : pass.on
 		if (!s) continue
-		const opts = Object.assign({ accuracy: settings.accuracy, display: settings.display }, pass.options, isObj(s) ? s : {})
+		const opts = Object.assign(
+			{ accuracy: settings.accuracy, display: settings.display },
+			pass.options,
+			isObj(s) ? s : {}
+		)
 		const changes = pass.run(json, opts)
-		report.push({ id: pass.id, changes, bytes: JSON.stringify(json).length })
+		report.push({
+			id: pass.id,
+			changes,
+			bytes: JSON.stringify(json).length,
+		})
 	}
 	const text = serialise(json, fmt)
 	report.push({ id: 'output', bytes: text.length })
