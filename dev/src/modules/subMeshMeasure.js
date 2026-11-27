@@ -42,6 +42,7 @@
 // left out: re-wiring may re-roll them, and they are a planned follow-up.
 
 import { compLayers, subMeshHosts, driverUsesLayerSeed, oscillatorConfig } from './cavalryExport.js'
+import { findImageFillShapes, assetArrayOf } from './imageBake.js'
 import { expressionIsIndexPure, phaseSampleGap } from './submeshVisibility.js'
 import { rawBake } from './duplicatorCompRefs.js'
 
@@ -151,7 +152,8 @@ function IntegerCrossings(id, attr, f0, f1) {
 	return out
 }
 
-// Every subMesh attribute in the comp that needs a measurement.
+// Every subMesh attribute in the comp that needs a measurement, plus any
+// assetArray-driven imageShader's `arrayIndex` and host `shapeId` drivers.
 //
 // The comp a user exports is often a shell: the rig sits inside the comps its
 // compositionReference layers point at. compLayers() stops at a reference (its
@@ -162,6 +164,12 @@ export function subMeshMeasureTargets(comp) {
 	const out = []
 	const own = {}
 	const shift = Number(api.get(comp, 'startFrame')) || 0
+	const f0 = Number(api.get(comp, 'startFrame')) || 0
+	const f1 = Number(api.get(comp, 'endFrame')) || f0
+	const p0 = Number(api.get(comp, 'playbackStart'))
+	const p1 = Number(api.get(comp, 'playbackEnd'))
+	const sampleF0 = isFinite(p0) ? p0 : f0
+	const sampleF1 = isFinite(p1) && p1 >= sampleF0 ? p1 : f1
 	deepSubMeshes(comp, own).forEach((hit) => {
 		const hosts = subMeshHosts(hit.sm, hit.comp)
 		if (!hosts.length) return
@@ -177,6 +185,64 @@ export function subMeshMeasureTargets(comp) {
 			}
 		})
 	})
+	// Multi-image assetArray fills: measure `assetArray.arrayIndex` (which image
+	// each copy shows) and `duplicator.shapeId` (which copies show the image-
+	// filled shape at each frame). Restore the playhead after IntegerCrossings.
+	const savedFrame = typeof api.getFrame === 'function' ? api.getFrame() : null
+	const seenNodeAttr = {}
+	const addDriverTarget = (ownerId, attr, host, evalComp, allowLayerSeed) => {
+		const key = ownerId + ':' + attr + ':' + host
+		if (seenNodeAttr[key]) return
+		const conn = srcOf(ownerId, attr)
+		if (!conn) return
+		if (!allowLayerSeed && driverUsesLayerSeed(ownerId, attr)) return
+		const type = api.getLayerType(conn)
+		let frames = [sampleF0]
+		if (type === 'random' || type === 'noise') {
+			let seedDriven = ''
+			let seedKeys = []
+			let timeOffDriven = ''
+			try { seedDriven = String(api.getInConnection(conn, 'seed') || '').split('.')[0] } catch (e) {}
+			try { seedKeys = api.getKeyframeTimes(conn, 'seed') || [] } catch (e) {}
+			try { timeOffDriven = String(api.getInConnection(conn, 'timeOffset') || '').split('.')[0] } catch (e) {}
+			if (seedDriven || seedKeys.length) {
+				const crosses = IntegerCrossings(conn, 'seed', sampleF0 - shift, sampleF1 - shift)
+				const all = crosses.length ? [sampleF0].concat(crosses) : [sampleF0]
+				if (all.length > MAX_SAMPLES) {
+					const picked = [all[0]]
+					for (let k = 1; k < MAX_SAMPLES - 1; k++) {
+						const idx = Math.round((k * (all.length - 1)) / (MAX_SAMPLES - 1))
+						if (picked[picked.length - 1] !== all[idx]) picked.push(all[idx])
+					}
+					if (picked[picked.length - 1] !== all[all.length - 1]) picked.push(all[all.length - 1])
+					frames = picked
+				} else {
+					frames = all
+				}
+			} else if (timeOffDriven) {
+				frames = chainSampleFrames(conn, sampleF0, sampleF1, shift)
+			}
+		} else {
+			frames = chainSampleFrames(conn, sampleF0, sampleF1, shift)
+		}
+		seenNodeAttr[key] = 1
+		out.push({ sm: ownerId, attr, host, evalComp, kind: 'value', node: conn, frames })
+	}
+	try {
+		findImageFillShapes(comp).forEach((hit) => {
+			const arr = assetArrayOf(hit.shader)
+			if (!arr) return
+			// Measure `arrayIndex` even when `useLayerAsSeed` is true: the probe
+			// mirrors the host duplicator and produces a stable per-copy index.
+			addDriverTarget(arr.node, 'arrayIndex', hit.host, hit.comp, true)
+			addDriverTarget(hit.host, 'shapeId', hit.host, hit.comp, false)
+		})
+	} catch (e) {
+	} finally {
+		if (savedFrame !== null && typeof api.setFrame === 'function') {
+			try { api.setFrame(savedFrame) } catch (e) {}
+		}
+	}
 	return out
 }
 

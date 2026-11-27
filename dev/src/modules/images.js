@@ -34,6 +34,21 @@ function toJpeg(src, scratchDir) {
 	return api.encodeBinary(out).length < api.encodeBinary(src).length ? out : src
 }
 
+// Bundle path for external-image JSON exports: <dir>/<stem>/<stem>.json so the
+// JSON and its images/ folder travel together. Avoids double-nesting when the
+// chosen parent folder already has the same name as the file stem.
+export function externalBundlePath(out) {
+	var clean = String(out || '').replace(/\\/g, '/')
+	var slash = clean.lastIndexOf('/')
+	var parent = slash >= 0 ? clean.slice(0, slash) : ''
+	var fileName = slash >= 0 ? clean.slice(slash + 1) : clean
+	var stem = fileName.replace(/\.json$/i, '') || 'animation'
+	var parentSlash = parent.lastIndexOf('/')
+	var parentName = parentSlash >= 0 ? parent.slice(parentSlash + 1) : parent
+	var dir = parentName === stem ? parent : (parent ? parent + '/' + stem : stem)
+	return { dir: dir, file: dir + '/' + fileName, folderName: stem }
+}
+
 // opts: { embed, jpeg, scratchDir, lottie: [] (collects { name, data } for i/) }
 // -> { embedded, copied, jpeg, missing }
 export function packImages(json, dirs, outDir, opts) {
@@ -70,13 +85,16 @@ export function packImages(json, dirs, outDir, opts) {
 			res.embedded++
 		} else {
 			var name = unique(api.getFileNameFromPath(file, true), src, a.id)
-			var target = outDir + '/images/' + name
+			var imgDir = outDir + '/images'
+			if (!api.isDirectory(imgDir)) api.makeFolder(imgDir)
+			var target = imgDir + '/' + name
 			if (target !== file) {
 				if (api.filePathExists(target)) api.deleteFilePath(target)
 				if (!api.copyFilePath(file, target)) return
 			}
 			a.u = 'images/'
 			a.p = name
+			a.e = 0
 			res.copied++
 		}
 		if (jpeg) api.deleteFilePath(file)

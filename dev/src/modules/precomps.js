@@ -1222,7 +1222,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 	// Everything the exporter reads is converted back to the authored frame the writer labels.
 	// `timeBase` reads the CURRENT startFrame, so a comp whose crop is still applied (an
 	// older caller) still converts correctly; the render-queue crop leaves it at 0.
-	const shift = timeBase(compId)
+	const frameShift = timeBase(compId)
 
 	function build(comp, ref) {
 		const plan = planMattes(comp, (w) => warnings.push(w))
@@ -1490,7 +1490,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 		const frames = [start, Math.round((start + end) / 2), end]
 		const time = api.get(comp, 'time') || 0 // already a read frame, not a label
 		const ids = [...new Set(sceneOf.values())]
-		const world = samplePivots(comp, ids, frames, undefined, shift)
+		const world = samplePivots(comp, ids, frames, undefined, frameShift)
 		const anchorFor = (L) => {
 			const id = sceneOf.get(L)
 			const pv = id && api.get(id, 'pivot')
@@ -1504,7 +1504,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 			const all = []
 			for (let f = start; f <= end; f++) all.push(f)
 			const vids = res.varying.map((L) => sceneOf.get(L))
-			const full = samplePivots(comp, vids, all, undefined, shift)
+			const full = samplePivots(comp, vids, all, undefined, frameShift)
 			res.varying.forEach((L) => bakePosition(L, full[sceneOf.get(L)], res.parentMatrix))
 			baked += res.varying.length
 		}
@@ -1518,7 +1518,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 			for (let f = start; f <= end; f++) every.push(f)
 			const shapesOf = new Map()
 			for (const [, ms] of masked) for (const m of ms) if (!shapesOf.has(m.id)) shapesOf.set(m.id, sourceShapes(m.id))
-			const sampled = samplePivots(comp, [], every, [...new Set([].concat(...shapesOf.values()))], shift)
+			const sampled = samplePivots(comp, [], every, [...new Set([].concat(...shapesOf.values()))], frameShift)
 			// a source's contours at each frame: all its shapes' contours together
 			const paths = {}
 			for (const [src, shapes] of shapesOf) {

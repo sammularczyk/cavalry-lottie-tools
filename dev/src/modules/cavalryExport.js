@@ -178,7 +178,7 @@ export function exportComp(compId, opts) {
 	// bakes as a flat fill of its material colour. Bake one cell of each shader
 	// in a comp built for it, then repeat that cell over every copy.
 	if (opts && opts.imageFills !== false) {
-		if (applyImageFillsFromScene(compId, json, dir, shift)) text = JSON.stringify(json)
+		if (applyImageFillsFromScene(compId, json, dir, shift, opts && opts.measuredSubMesh)) text = JSON.stringify(json)
 	}
 	console.log('[restructure] DONE. assets=' + (json.assets ? json.assets.length : 0) + ', layers=' + json.layers.length)
 	return { json: json, text: text, dir: dir, file: file, baked: restore.map(function (r) { return r[0] }), shift: shift, first: compIP, last: compOP - 1 }
@@ -188,7 +188,7 @@ export function exportComp(compId, opts) {
 // Cavalry in a comp of its own (see imageBake.js), copied into this comp's
 // export folder so the image packer resolves it like any other image, then
 // repeated over the copies by imageFills.js.
-function applyImageFillsFromScene(compId, json, dir, shift) {
+function applyImageFillsFromScene(compId, json, dir, shift, measured) {
 	var bakes = []
 	try {
 		bakes = bakeImageFills(compId, shift || 0)
@@ -197,16 +197,59 @@ function applyImageFillsFromScene(compId, json, dir, shift) {
 		return false
 	}
 	if (!bakes.length) return false
+	var lookupMeasured = function (host, ownerId, attr) {
+		if (!measured || !ownerId) return null
+		if (host && measured[host + ':' + ownerId] && measured[host + ':' + ownerId][attr]) return measured[host + ':' + ownerId][attr]
+		if (measured[ownerId] && measured[ownerId][attr]) return measured[ownerId][attr]
+		return null
+	}
 	var jobs = []
-	bakes.forEach(function (b) {
-		var target = dir + '/' + b.assetP
+	var copiedCount = 0
+	var copiedFiles = {}
+	var copyIntoDir = function (assetFile, assetP) {
+		if (copiedFiles[assetP] === assetFile) return true
+		var target = dir + '/' + assetP
 		try {
 			if (api.filePathExists(target)) api.deleteFilePath(target)
-			api.copyFilePath(b.assetFile, target)
+			api.copyFilePath(assetFile, target)
+			copiedFiles[assetP] = assetFile
+			copiedCount++
+			return true
 		} catch (e) {
-			console.log('[image-fill] could not copy ' + b.assetP + ': ' + (e && e.message))
+			console.log('[image-fill] could not copy ' + assetP + ': ' + (e && e.message))
+			return false
+		}
+	}
+	bakes.forEach(function (b) {
+		if (Array.isArray(b.assets) && b.assets.length) {
+			var copied = []
+			b.assets.forEach(function (a) {
+				if (!copyIntoDir(a.assetFile, a.assetP)) return
+				copied.push({
+					assetId: a.assetId,
+					assetW: a.assetW,
+					assetH: a.assetH,
+					assetU: '',
+					assetP: a.assetP
+				})
+			})
+			if (!copied.length) return
+			jobs.push({
+				assets: copied,
+				copyCount: b.copyCount,
+				allowUnderCount: b.allowUnderCount,
+				cellW: b.cellW,
+				spansPitch: b.spansPitch,
+				copyAssetIndex: b.copyAssetIndex,
+				copyOpacity: b.copyOpacity,
+				assetArrayReverse: b.assetArrayReverse,
+				shapeSlot: b.shapeSlot,
+				measuredArrayIndex: lookupMeasured(b.host, b.assetArrayNode, 'arrayIndex'),
+				measuredShapeId: lookupMeasured(b.host, b.host, 'shapeId')
+			})
 			return
 		}
+		if (!copyIntoDir(b.assetFile, b.assetP)) return
 		jobs.push({
 			assetId: b.assetId,
 			assetW: b.assetW,
@@ -221,7 +264,7 @@ function applyImageFillsFromScene(compId, json, dir, shift) {
 	if (!jobs.length) return false
 	var r = applyImageFills(json, jobs)
 	r.notes.forEach(function (n) { console.log('[image-fill] ' + n) })
-	if (r.changed) console.log('[image-fill] ' + r.changed + ' layer(s), ' + jobs.length + ' cell image(s)')
+	if (r.changed) console.log('[image-fill] ' + r.changed + ' layer(s), ' + copiedCount + ' cell image(s)')
 	return r.changed > 0
 }
 

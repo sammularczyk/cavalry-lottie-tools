@@ -9,7 +9,7 @@ import { theme, label, section, button, row, toggleRow, list, tabStrip, icon } f
 import { checkForUpdate } from './modules/updateChecker.js'
 import { exportComp, BAKE_MODES } from './modules/cavalryExport.js'
 import { restructureDuplicators } from './modules/duplicatorRestructure.js'
-import { packImages } from './modules/images.js'
+import { packImages, externalBundlePath } from './modules/images.js'
 import { gzipSize, zip, utf8, base64 } from './modules/zip.js'
 import { exportWithPrecomps } from './modules/precomps.js'
 import { needsTimingMeasurement, timingMeasurementPending, discardTimingMeasurement, prepareTimingMeasurement, collectTimingMeasurement, shouldRetryMeasurement } from './modules/duplicatorCompRefs.js'
@@ -290,7 +290,7 @@ var ROW_TEXT = {
 	refitEased: ['Experimental: refit eased keys', 'Keyframe fitting also replaces keys that already have eases, staying within your accuracy every half frame. For particles and simulations Cavalry exports as many eased keys; can halve them. Replaces eases you set by hand, and optimising takes longer.', 'Fewer keys, eases not kept'],
 	holdAll: ['Hold every frame-by-frame key', 'Plays exactly Cavalry’s frames, with no in-between frames on fast screens. Smooth baked motion will step at your comp’s frame rate.', 'Exact frames, no in-betweens'],
 	stripNames: ['Strip layer and shape names', 'Smaller file. Leave off if a developer changes colours or text from code, since apps find layers by name.', 'Leave off if apps find layers by name'],
-	embedImages: ['Embed images in the file', 'Puts images inside the JSON, so it’s one file to hand over. Images grow by a third when embedded. Off: images are saved in an images folder next to the file. A .lottie always holds its images.', 'One file, nothing to lose'],
+	embedImages: ['Embed images in the file', 'Puts images inside the JSON, so it’s one file to hand over. Images grow by a third when embedded. Off: saves the JSON and an images/ folder together inside a subfolder named after the file. A .lottie always holds its images.', 'One file, nothing to lose'],
 	jpegImages: ['Save opaque images as JPEG', 'Images with no transparency are saved as JPEG (85% quality) when that’s smaller. Slight JPEG softening. macOS only; Cavalry asks you to trust the script the first time.', 'Smaller, slightly softer'],
 	pretty: ['Pretty print', 'Spaced out so people can read it. Much larger; use for debugging only.', 'Readable, much larger'],
 	shareDuplicatorAnimation: ['Share a duplicator’s animation as one precomp', 'When the copies of a duplicator share one animation, differing only by a time offset, the curve is written once and each copy references it with its own start. Needs the baked transforms to be recovered first, so it runs straight after that pass.', 'One curve instead of 91. Biggest saving on staggered grids.'],
@@ -522,17 +522,27 @@ function optimiseAndWrite(json, out, extra, dirs) {
 		if (files.length) notes.push(files.length + ' image(s) packed in the .lottie')
 	}
 	if (fmt.json) {
-		var pack = packImages(result.json, dirs, api.getFolderFromPath(out), { embed: settings.embedImages, jpeg: settings.jpegImages })
+		var jsonOut = out
+		var imgOutDir = api.getFolderFromPath(out)
+		var jsonLabel = api.getFileNameFromPath(out, true)
+		if (!settings.embedImages) {
+			var bundle = externalBundlePath(out)
+			if (!api.isDirectory(bundle.dir)) api.makeFolder(bundle.dir)
+			jsonOut = bundle.file
+			imgOutDir = bundle.dir
+			jsonLabel = bundle.folderName + '/' + jsonLabel
+		}
+		var pack = packImages(result.json, dirs, imgOutDir, { embed: settings.embedImages, jpeg: settings.jpegImages })
 		if (pack.embedded || pack.copied) result.text = serialise(result.json, fmtOpts)
 		if (pack.embedded) notes.push(pack.embedded + ' image(s) embedded')
-		if (pack.copied) notes.push(pack.copied + ' image(s) saved to images/')
+		if (pack.copied) notes.push(pack.copied + ' image(s) saved to ' + (settings.embedImages ? 'images/' : bundle.folderName + '/images/'))
 		if (pack.jpeg) notes.push(pack.jpeg + ' as JPEG')
 		if (pack.missing) notes.push(pack.missing + ' image(s) not found')
-		if (!api.writeToFile(out, result.text, true)) {
-			console.error(TAG + 'Could not write ' + out)
+		if (!api.writeToFile(jsonOut, result.text, true)) {
+			console.error(TAG + 'Could not write ' + jsonOut)
 			return
 		}
-		saved.unshift(api.getFileNameFromPath(out, true) + ' ' + kb(result.text.length) + ' (' + kb(gzipSize(result.text)) + ' gzipped)')
+		saved.unshift(jsonLabel + ' ' + kb(result.text.length) + ' (' + kb(gzipSize(result.text)) + ' gzipped)')
 	}
 	result.report[result.report.length - 1].bytes = result.text.length
 	// warnings to the console one per line; other notes go in the report
