@@ -336,7 +336,7 @@ test('alignedPairs flips y and aligns centroids before nearest matching', () => 
 })
 
 test('alignedPairs rescales a live grid that is in unscaled duplicator space', () => {
-	// AD_Card_14: duplicator#24 under group#95/#94/#96 (composite scale 2.414).
+	// _14: duplicator#24 under group#95/#94/#96 (composite scale 2.414).
 	// extractSubMeshes reports centres at pitch 340, the baked paths at 821.
 	const live = []
 	for (let y = 0; y < 20; y++) for (let x = 0; x < 14; x++) live.push([x * 340, y * 340])

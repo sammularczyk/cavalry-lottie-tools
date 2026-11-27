@@ -54,7 +54,7 @@ const srcOf = (id, attr) => String(api.getInConnection(id, attr) || '').split('.
 
 // The frames a driver is worth reading over: the comp's PLAYBACK range, not its
 // authored range. A comp often carries far more authored frames than it plays
-// (AD_Card_14: endFrame 1200, playbackEnd 467), and sampling the authored range
+// (_14: endFrame 1200, playbackEnd 467), and sampling the authored range
 // stretches the stride so an animated driver's keys land between samples.
 function sampleRange(comp) {
 	const f0 = Number(api.get(comp, 'startFrame')) || 0
@@ -80,7 +80,7 @@ export function measureTarget(sm, attr, comp, shift) {
 	if (type === 'visibility') return null
 	if (type === 'javaScript' && expressionIsIndexPure(api.get(conn, 'expression'))) return null
 	if (driverUsesLayerSeed(sm, attr)) return null
-	// Sample the PLAYBACK range: the authored range can be far longer (AD_Card_14
+	// Sample the PLAYBACK range: the authored range can be far longer (_14
 	// authors 1200 frames and plays 467), and striding over 1200 with a 24-sample
 	// cap drops the falloff's 202 -> 221 scale ramp between samples.
 	const [f0, f1] = sampleRange(comp)
@@ -155,7 +155,7 @@ function chainSampleFrames(conn, f0, f1, shift) {
 			// connects its sources on the indexed slot, `falloffs.0.id`, so the
 			// top-level attribute has no in-connection of its own. Without expanding
 			// it the walk stops at the Value and never reaches the Falloff whose
-			// `scale.x` carries the reveal ramp (AD_Card_14 keys 202 -> 221).
+			// `scale.x` carries the reveal ramp (_14 keys 202 -> 221).
 			let kids = []
 			try { kids = api.getAttrChildren(id, attr) || [] } catch (e) { kids = [] }
 			kids.forEach((slot) => ['', '.id', '.out'].forEach((suffix) => readAttr(id, slot + suffix)))

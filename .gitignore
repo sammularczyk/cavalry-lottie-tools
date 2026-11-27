@@ -12,6 +12,4 @@ dev/test/fixtures/cavalry-duplicator-grid.json
 find-dsh-config.js
 gridtest06_fixed.json
 dev/src/modules/cavalryExport.js.bak
-analysis/Quiz BG_measured.json
-analysis/decomposition.json
-analysis/submesh-visibility-handoff.md
+analysis/

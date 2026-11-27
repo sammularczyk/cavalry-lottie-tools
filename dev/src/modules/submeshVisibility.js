@@ -561,7 +561,7 @@ export function pairByCentre(copyCentres, groupCentres) {
 //
 // The two sets are not always at the same SCALE. extractSubMeshes reports a
 // copy's centre in the duplicator's own unscaled grid space, while the baked
-// paths carry the comp-space copies the writer produced. AD_Card_14's
+// paths carry the comp-space copies the writer produced. _14's
 // duplicator#24 sits under group#95/#94/#96 (composite scale 2.414), so its live
 // pitch reads 340 and its baked pitch 821 — a nearest-centre match on raw
 // coordinates paired copies 2.4 grids apart and the reveal landed off-centre.

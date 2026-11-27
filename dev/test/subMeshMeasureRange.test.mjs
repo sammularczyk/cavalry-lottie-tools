@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-// Two sampling bugs made AD_Card_14's mango reveal uneven and off-centre:
+// Two sampling bugs made _14's mango reveal uneven and off-centre:
 // 1. measureTarget sampled the comp's authored range (1200 frames) instead of
 //    the playback range (467), so a 24-sample cap left an 53-frame stride and
 //    the falloff's 202 -> 221 scale ramp fell between samples.
