@@ -371,7 +371,7 @@ test('a measured multi-frame value reproduces as hold keys', () => {
 
 test('measureTarget routes each driver', () => {
 	let s = buildScene('value', {}, 'shapeVisibility')
-	assert.deepEqual(measureTarget(s.sm, 'shapeVisibility', 'comp#1'), { kind: 'value', node: s.driver, frames: [0] })
+	assert.deepEqual(measureTarget(s.sm, 'shapeVisibility', 'comp#1'), { kind: 'value', node: s.driver, frames: [0], interp: true })
 	s = buildScene('visibility', {}, 'shapeVisibility')
 	assert.equal(measureTarget(s.sm, 'shapeVisibility', 'comp#1'), null)
 	s = buildScene('javaScript', { expression: 'ctx.index % 2' }, 'shapeVisibility')

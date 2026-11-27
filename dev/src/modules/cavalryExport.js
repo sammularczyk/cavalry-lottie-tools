@@ -2,8 +2,9 @@
 // The scene is left as it was: bake overrides are restored and the queue item deleted.
 
 import { visibilitySequenceMask, expressionValues, gateOf, clampOpacity, oscillatorSeries, oscillatorPhaseFromSamples, applyValuesToGroups, alignedPairs } from './submeshVisibility.js'
-import { bakeImageFills } from './imageBake.js'
-import { applyImageFills } from './imageFills.js'
+import { bakeImageFills, bakeCompImageFills } from './imageBake.js'
+import { applyImageFills, placeCompImages } from './imageFills.js'
+import { splitFillAlpha } from './fillAlpha.js'
 
 // forceLottieBake values, in Cavalry's order.
 export var BAKE_MODES = ['Automatic', 'Animated Mesh', 'Animated Mesh & Materials', 'Nuclear', 'Still']
@@ -222,13 +223,58 @@ export function exportComp(compId, opts) {
 	if (injectSubMeshVisibility(compId, json, frames, opts && opts.measuredSubMesh, shift)) text = JSON.stringify(json)
 	if (restructureDuplicators(compId, json, frames, opts, shift)) text = JSON.stringify(json)
 	// Cavalry's writer emits no image asset for an imageShader fill: the shape
-	// bakes as a flat fill of its material colour. Bake one cell of each shader
-	// in a comp built for it, then repeat that cell over every copy.
+	// bakes as a flat fill of its material colour. Two placements exist, and they
+	// are disjoint: a shape repeated by a duplicator in THIS comp bakes its copies
+	// here, so one image per copy group lands in the comp; a shape inside a
+	// referenced comp is drawn once and instanced by the consuming duplicator, so
+	// one image per shape lands inside that comp's own asset.
 	if (opts && opts.imageFills !== false) {
 		if (applyImageFillsFromScene(compId, json, dir, shift, opts && opts.measuredSubMesh)) text = JSON.stringify(json)
+		if (applyCompImageFillsFromScene(compId, json, dir, shift)) text = JSON.stringify(json)
 	}
+	// Cavalry writes a shape's material alpha into the fill colour's 4th channel.
+	// No player reads that channel, so the shape would draw solid; move it into
+	// the fill's opacity, which is where Lottie puts transparency.
+	if (splitFillAlpha(json)) text = JSON.stringify(json)
 	console.log('[restructure] DONE. assets=' + (json.assets ? json.assets.length : 0) + ', layers=' + json.layers.length)
 	return { json: json, text: text, dir: dir, file: file, baked: restore.map(function (r) { return r[0] }), shift: shift, first: compIP, last: compOP - 1 }
+}
+
+// Put a comp-local imageShader fill back as a real image, inside this comp.
+//
+// Used for shapes reached through a composition reference. The referenced comp
+// is exported as ONE asset and instanced once per copy, so the image belongs
+// inside that asset rather than repeated per copy here.
+function applyCompImageFillsFromScene(compId, json, dir, shift) {
+	var bakes = []
+	try {
+		bakes = bakeCompImageFills(compId, shift || 0)
+	} catch (e) {
+		console.log('[image-fill] comp capture failed: ' + (e && e.message))
+		return false
+	}
+	if (!bakes.length) return false
+	var jobs = []
+	var copied = 0
+	bakes.forEach(function (b) {
+		var target = dir + '/' + b.assetP
+		try {
+			if (api.filePathExists(target)) api.deleteFilePath(target)
+			api.copyFilePath(b.assetFile, target)
+		} catch (e) {
+			console.log('[image-fill] could not copy ' + b.assetP + ': ' + (e && e.message))
+			return
+		}
+		copied++
+		jobs.push({ assetId: b.assetId, assetW: b.assetW, assetH: b.assetH, assetU: '', assetP: b.assetP, px: b.px, py: b.py, color: b.color })
+	})
+	if (!jobs.length) return false
+	var r = placeCompImages(json, jobs)
+	r.notes.forEach(function (n) {
+		console.log('[image-fill] ' + n)
+	})
+	if (r.changed) console.log('[image-fill] ' + r.changed + ' comp image(s), ' + copied + ' file(s)')
+	return r.changed > 0
 }
 
 // Put each imageShader fill back as a real image. The cell is rendered by

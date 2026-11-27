@@ -109,7 +109,11 @@ export function measureTarget(sm, attr, comp, shift) {
 	// mango grid reads 279 visible copies at frame 0 and 217 from frame 240 on,
 	// with no keyframe on the valueBlend itself — the change comes from further
 	// up the chain. So sample evenly across the range, plus the ends.
-	return { kind: 'value', node: conn, frames: chainSampleFrames(conn, f0, f1, shift || 0) }
+	// `interp` marks a CONTINUOUS driver, whose value between two samples is
+	// better estimated by interpolating them than by holding the earlier one.
+	// A seeded driver is the opposite (its value re-rolls and then holds), so it
+	// is measured on its crossing frames and left on hold semantics.
+	return { kind: 'value', node: conn, frames: chainSampleFrames(conn, f0, f1, shift || 0), interp: true }
 }
 
 // A cap on how many frames one target is sampled at. Each sample is a whole
@@ -117,7 +121,26 @@ export function measureTarget(sm, attr, comp, shift) {
 // on a long comp (e.g. 38 crossings over 820 frames) need every crossing frame
 // so switches do not skip or drift out of sync with baked fill switches.
 const MAX_SAMPLES = 24
+// Once the driver's chain carries keyframes the coarse sweep is a safety net,
+// not the main coverage: the span points do the work. Measured on _14's falloff,
+// whose scale is keyed 202 -> 221 and which switches 171 of 280 copies on inside
+// that ramp: span points plus a 3-point sweep hold 0.21% wrong-gate where the
+// full 24-point sweep reached 0.17%. The 22 extra bakes bought 0.04%.
+const SAFETY_SAMPLES = 4
 const MAX_CROSSING_SAMPLES = 64
+
+// Points sampled inside a keyframe span, and the hard budget of EXTRA bakes one
+// target may spend on them. A baked value is held from its sample until the next
+// one, so a coarse stride reads the wrong gate on every frame between samples:
+// on _14's falloff (scale keyed 202 -> 221) the held value disagreed with the
+// true per-copy gate on 3.7% of copy-frames, all of it inside the 19-frame ramp.
+// Sampling the ramp sparsely and interpolating between samples in the exporter
+// recovers nearly all of that for a handful of bakes: 8 points per span takes
+// that comp from 3.65% to 0.19% wrong for 6 extra bakes, while filling every
+// frame bought 0.00% for 17 extra. Both caps are what keep a rig keyed across a
+// long comp from turning one export into hundreds of bakes.
+const MAX_SPAN_POINTS = 8
+const MAX_DENSE_FRAMES = 48
 
 // Frames worth sampling for a driver that may animate. Not derivable from
 // keyframes: the mango grid's value-blend rig has no keyframe on the valueBlend
@@ -130,17 +153,21 @@ function chainSampleFrames(conn, f0, f1, shift) {
 	const times = [f0]
 	const span = Math.max(0, f1 - f0)
 	if (span <= 0) return times
-	const stride = Math.max(1, Math.ceil(span / (MAX_SAMPLES - 1)))
-	for (let t = f0; t <= f1; t += stride) if (!seen[t]) { seen[t] = 1; times.push(t) }
-	if (!seen[f1]) times.push(f1)
+	if (!seen[f1]) { seen[f1] = 1; times.push(f1) }
 	if (typeof api.getAttributes !== 'function') return times
 	const stack = [conn]
 	const visited = {}
+	const keyTimes = []
 	const readAttr = (id, attr) => {
 		let kt = []
 		try { kt = api.getKeyframeTimes(id, attr) || [] } catch (e) { kt = [] }
 		// keyframe times are authored labels; sample them in read space
-		kt.forEach((t) => { if (typeof t === 'number') { const r = t - shift; if (r > f0 && r < f1 && !seen[r]) { seen[r] = 1; times.push(r) } } })
+		kt.forEach((t) => {
+			if (typeof t !== 'number') return
+			const r = t - shift
+			if (r >= f0 && r <= f1) keyTimes.push(r)
+			if (r > f0 && r < f1 && !seen[r]) { seen[r] = 1; times.push(r) }
+		})
 		let src = ''
 		try { src = String(api.getInConnection(id, attr) || '').split('.')[0] } catch (e) { src = '' }
 		if (src && src !== id) stack.push(src)
@@ -161,7 +188,47 @@ function chainSampleFrames(conn, f0, f1, shift) {
 			kids.forEach((slot) => ['', '.id', '.out'].forEach((suffix) => readAttr(id, slot + suffix)))
 		})
 	}
+	// Add a coarse sweep of the range. It is the only coverage when nothing in
+	// the chain is keyed, and a safety net for a value that drifts somewhere the
+	// keyframes do not mark. Once the chain IS keyed the sweep can be much
+	// sparser: on _14 the ramp points alone hold 0.21% wrong-gate where the dense
+	// 24-sample sweep reached 0.17%, so the extra 22 bakes bought 0.04%.
+	const sweep = keyTimes.length ? SAFETY_SAMPLES : MAX_SAMPLES
+	const stride = Math.max(1, Math.ceil(span / (sweep - 1)))
+	for (let t = f0; t <= f1; t += stride) if (!seen[t]) { seen[t] = 1; times.push(t) }
 	times.sort((a, b) => a - b)
+	return denseSpan(times, keyTimes.filter((t) => t >= f0 && t <= f1), f0, f1)
+}
+
+// Samples a keyframe span at evenly spaced points, including both ends. The
+// exporter interpolates between measured frames, so the span does not need every
+// frame: on _14's 19-frame ramp eight points cut the wrong-gate rate from 3.65%
+// to 0.19% where filling all 19 frames only reached 0.00% for more than twice the
+// bakes. Budgeted so a rig keyed across a long comp degrades to the coarse grid
+// rather than to hundreds of bakes.
+function denseSpan(times, keyTimes, f0, f1) {
+	const keys = [...new Set(keyTimes)].sort((a, b) => a - b)
+	if (keys.length < 2) return times
+	const seen = {}
+	times.forEach((t) => { seen[t] = 1 })
+	let budget = MAX_DENSE_FRAMES
+	let filled = 0
+	for (let i = 1; i < keys.length; i++) {
+		const a = Math.max(f0, Math.ceil(keys[i - 1]))
+		const b = Math.min(f1, Math.floor(keys[i]))
+		const span = b - a
+		if (span < 1) continue
+		const step = Math.max(1, Math.ceil(span / (MAX_SPAN_POINTS - 1)))
+		for (let f = a; f <= b; f += step) {
+			if (seen[f] || budget <= 0) continue
+			seen[f] = 1
+			times.push(f)
+			budget--
+			filled++
+		}
+		if (budget <= 0) break
+	}
+	if (filled) times.sort((a, b) => a - b)
 	return times
 }
 
@@ -518,6 +585,9 @@ export function collectSubMeshMeasurement(state) {
 			// each copy's reads across the frames.
 			const copies = per[0].map((c, i) => ({ c: c.c, v: c.v, vs: per.map((cs) => cs[i].v) }))
 			const entry = { kind: t.kind, node: t.node, frames: t.frames, copies }
+			// A continuous driver is interpolated between its samples by the
+			// exporter; a seeded one re-rolls and holds, so it must not be.
+			if (t.interp) entry.interp = true
 			if (!result.values[t.sm]) result.values[t.sm] = {}
 			result.values[t.sm][t.attr] = entry
 			if (t.host) {

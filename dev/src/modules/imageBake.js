@@ -171,7 +171,9 @@ export function hostShapeSlotOf(host, shapeId) {
 // assigned across copies in order (cycling modulo the array length) unless
 // measured per-copy `arrayIndex` / `shapeId` data is supplied.
 function bakeAssetArray(shapeInfo, arr, startIndex) {
-	const grid = copyGridOf(shapeInfo.host)
+	// A comp-local shader (no duplicator of its own) draws exactly one copy of its
+	// artwork, so the array's first image is that copy's fill.
+	const grid = (shapeInfo.host && copyGridOf(shapeInfo.host)) || { x: 1, y: 1 }
 	if (!grid) {
 		console.log('[image-fill] ' + shapeInfo.shape + ': could not read copy grid for assetArray; fill left flat')
 		return { job: null, nextIndex: startIndex }
@@ -414,7 +416,7 @@ export function captureShaderOnly(compId, shapes, atFrame) {
 		// tree, not the comp's direct children: the artwork that must go (the card
 		// text, the Share reference) sits under the same top-level group the
 		// duplicators do, so hiding only top-level children leaves it drawn.
-		const hosts = shapes.map((x) => x.host)
+		const hosts = shapes.map((x) => x.host || x.shape)
 		const keep = keepFor(compId, hosts)
 		const hideTree = (id) => {
 			let type = ''
@@ -553,6 +555,166 @@ function shaderSignature(s) {
 	} catch (e) {
 		return null
 	}
+}
+
+// All shapes with an imageShader fill in THIS comp, regardless of what repeats
+// them.
+//
+// A comp that a duplicator instances through a composition reference is drawn as
+// ONE card inside its own comp and repeated by the duplicator, so nothing inside
+// that comp is "under a duplicator" and the parent-chain rule finds nothing. What
+// the comp needs is one image of the shader in the card's own coordinates; every
+// instance then shows it.
+//
+// Composition references are NOT followed: each referenced comp is exported as
+// its own asset, and its layers only exist in that asset, so a capture taken here
+// would have nowhere to land. -> [{ shape, shader, slot, comp }]
+export function findShaderFillShapes(compId) {
+	const out = []
+	const seen = {}
+	const walk = (ids, comp) => {
+		for (const id of ids || []) {
+			if (seen[id]) continue
+			seen[id] = 1
+			let type = ''
+			try { type = api.getLayerType(id) } catch (e) { continue }
+			if (SHAPE_TYPES[type]) {
+				const hit = imageShaderOf(id)
+				// A shape repeated by a duplicator in the SAME comp is handled by the
+				// per-copy path (findImageFillShapes), which bakes its lattice. Only
+				// shapes with no duplicator above them need an image of their own.
+				if (hit && !duplicatorOf(id)) out.push({ shape: id, shader: hit.shader, slot: hit.slot, comp: comp })
+			}
+			if (type === 'group' || type === 'duplicator' || type === 'subMesh' || type === 'compNode') {
+				try { walk(api.getChildren(id), comp) } catch (e) {}
+			}
+		}
+	}
+	try { walk(api.getChildren(compId), compId) } catch (e) {}
+	return out
+}
+
+// The opaque bounds of a rendered PNG in pixels, or null when nothing drew.
+function opaqueBounds(file) {
+	let img = null
+	try {
+		const b64 = api.encodeBinary(file)
+		if (!b64) return null
+		img = decodePng(fromBase64(b64))
+	} catch (e) { return null }
+	if (!img) return null
+	let minX = img.w, maxX = -1, minY = img.h, maxY = -1
+	for (let y = 0; y < img.h; y++) {
+		for (let x = 0; x < img.w; x++) {
+			if (img.rgba[(y * img.w + x) * 4 + 3] <= 24) continue
+			if (x < minX) minX = x
+			if (x > maxX) maxX = x
+			if (y < minY) minY = y
+			if (y > maxY) maxY = y
+		}
+	}
+	if (maxX < 0 || maxY < 0) return null
+	return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 }
+}
+
+// Bake one image per imageShader fill of a comp, positioned in that comp's own
+// space. The result is placed by imageFills.placeCompImages as a normal Lottie
+// image layer, so a comp the exporter turns into a precomp asset carries its
+// shader pixels inside the asset and every instance of it shows them.
+//
+// -> [{ shape, assetId, assetW, assetH, assetP, assetFile, assetB64, px, py }]
+//    `px`/`py` are the crop's centre in Lottie coordinates (y down, comp top-left).
+export function bakeCompImageFills(compId, shift) {
+	shift = shift || 0
+	const shapes = findShaderFillShapes(compId)
+	const out = []
+	if (!shapes.length) return out
+	const here = (() => { try { return api.getFrame() } catch (e) { return 0 } })()
+	let i = 0
+	shapes.forEach(function (s) {
+		const arr = assetArrayOf(s.shader)
+		if (arr) {
+			const job = bakeAssetArray(s, arr, i)
+			if (job.job) {
+				job.job.absolute = true
+				out.push(job.job)
+			}
+			i = job.nextIndex
+			return
+		}
+		// The shape may be scaled to nothing at the playhead the export starts on,
+		// so try the current frame, then the earliest frames of the comp.
+		let capture = null
+		const tryFrames = [here, 180 - shift, 150 - shift, 120 - shift, 60 - shift, 0 - shift]
+		const tried = {}
+		for (const f of tryFrames) {
+			if (tried[f]) continue
+			tried[f] = 1
+			try { api.setFrame(f) } catch (e) {}
+			let got = null
+			try {
+				got = captureShaderOnly(s.comp, [{ shape: s.shape, host: null, shader: s.shader }], f)
+			} catch (e) {
+				console.log('[image-fill] could not capture ' + s.shape + ' at ' + f + ': ' + (e && e.message))
+				continue
+			}
+			if (got && got.file) {
+				const box = opaqueBounds(got.file)
+				if (box) {
+					capture = { file: got.file, box: box }
+					break
+				}
+			}
+		}
+		try { api.setFrame(here) } catch (e) {}
+		if (!capture) {
+			console.log('[image-fill] ' + s.shape + ': no frame draws its shader; fill left flat')
+			return
+		}
+		const file = cropCell({ file: capture.file }, {
+			cx: capture.box.x + capture.box.w / 2,
+			cy: capture.box.y + capture.box.h / 2,
+			w: capture.box.w,
+			h: capture.box.h
+		})
+		if (!file) {
+			console.log('[image-fill] ' + s.shape + ': could not crop the shader; fill left flat')
+			return
+		}
+		let b64 = ''
+		try { b64 = api.encodeBinary(file) } catch (e) { b64 = '' }
+		if (!b64) {
+			console.log('[image-fill] ' + s.shape + ': the cropped shader could not be read back')
+			return
+		}
+		const w = Math.max(1, Math.round(capture.box.w))
+		const h = Math.max(1, Math.round(capture.box.h))
+		// The capture is a comp render, so its pixel rows already run top-down like
+		// Lottie's y axis: the crop's centre needs no flip. (Measured on the grey
+		// card: Cavalry y -5.79 in a 456-high comp exports as ks.p.y 233.8, which is
+		// exactly its pixel row.)
+		let color = null
+		try {
+			const mc = api.get(s.shape, 'material.materialColor')
+			if (mc) color = [mc.r / 255, mc.g / 255, mc.b / 255]
+		} catch (e) { color = null }
+		out.push({
+			shape: s.shape,
+			assetId: 'imgc' + i,
+			assetW: w,
+			assetH: h,
+			assetP: 'imgc' + i + '.png',
+			assetFile: file,
+			assetB64: b64,
+			absolute: true,
+			px: capture.box.x + capture.box.w / 2,
+			py: capture.box.y + capture.box.h / 2,
+			color: color,
+			copyCount: 1
+		})
+		i++
+	})
+	return out
 }
 
 // Bake every imageShader fill reachable from a comp.

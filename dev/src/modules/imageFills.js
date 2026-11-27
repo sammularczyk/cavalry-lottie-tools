@@ -55,6 +55,19 @@ function pair(v) {
 	return null
 }
 
+// A position property as [x, y], including Cavalry's split form
+// `{ x: {k}, y: {k}, s: true }`.
+function posOf(prop) {
+	var flat = pair(prop)
+	if (flat) return flat
+	if (prop && prop.x && prop.y) {
+		var x = prop.x.a === 1 ? null : prop.x.k
+		var y = prop.y.a === 1 ? null : prop.y.k
+		if (typeof x === 'number' && typeof y === 'number') return [x, y]
+	}
+	return null
+}
+
 function clone(o) {
 	return o == null ? o : JSON.parse(JSON.stringify(o))
 }
@@ -501,6 +514,126 @@ function resolveMeasuredCopies(groups, job) {
 		}
 	}
 	return { copyAssetIndex: copyAssetIndex, copyOpacity: copyOpacity }
+}
+
+// Place comp-local image fills INSIDE the comp they belong to.
+//
+// A shape whose imageShader sits inside a composition reference is drawn once,
+// inside that referenced comp, and the duplicator only instances the comp. So
+// there is no per-copy lattice to repeat: the comp needs one image, in its own
+// coordinates, and every instance shows it.
+//
+// The capture was taken at 1:1 comp scale, so the image goes in unscaled at the
+// crop's centre (`px`/`py`, already Lottie y-down). It is given a carrier that
+// clones the shape layer's own transform, so the card's animated scale, rotation
+// and position carry the image with them.
+//
+// jobs: [{ assetId, assetW, assetH, assetP, assetU, px, py, color }]
+export function placeCompImages(json, jobs) {
+	var notes = []
+	if (!jobs || !jobs.length) return { changed: 0, layers: [], notes: notes }
+	if (!json.assets) json.assets = []
+
+	var lists = allLayerLists(json)
+	var nextInd = 1
+	lists.forEach(function (list) {
+		list.layers.forEach(function (L) { if (L.ind >= nextInd) nextInd = L.ind + 1 })
+	})
+	var taken = {}
+	var changed = 0
+	var made = []
+
+	jobs.forEach(function (job) {
+		var w = Math.max(1, Math.round(job.assetW))
+		var h = Math.max(1, Math.round(job.assetH))
+		var assetId = assetFor(json, { assetId: job.assetId || 'imgfill', assetW: w, assetH: h, assetU: job.assetU == null ? '' : job.assetU, assetP: job.assetP })
+		var owner = null
+		var at = 0
+		if (job.color) {
+			for (var i = 0; i < lists.length && !owner; i++) {
+				var found = findPaintLayer(lists[i], job.color, taken, i)
+				if (!found) continue
+				owner = lists[i]
+				at = lists[i].layers.indexOf(found)
+				taken[i + ':' + found.ind] = true
+			}
+		}
+		// No colour match: the image still has to land somewhere it shows, and the
+		// comp's own layer list is where it was measured.
+		if (!owner) {
+			owner = lists[0]
+			at = 0
+		}
+		var ref = owner.layers[at] || {}
+		// The carrier carries the shape layer's own transform, so the image follows
+		// the card's animated scale and any rotation. The image then sits at the
+		// shape's own position in that carrier's space.
+		var base = ref.ks ? clone(ref.ks) : {}
+		var layerPos = posOf(base.p)
+		var carrier = {
+			ind: nextInd++,
+			ty: 3,
+			ip: ref.ip != null ? ref.ip : job.layerIp != null ? job.layerIp : 0,
+			op: ref.op != null ? ref.op : job.layerOp != null ? job.layerOp : 0,
+			st: ref.st || 0,
+			sr: 1,
+			ks: base
+		}
+		if (ref.parent != null) carrier.parent = ref.parent
+		if (ref.tt) carrier.tt = ref.tt
+		if (ref.td) carrier.td = ref.td
+		// `px`/`py` are comp pixels; the carrier is the shape layer's own transform,
+		// so subtract that layer's position to land back on the pixel the crop came
+		// from.
+		var image = {
+			ind: nextInd++,
+			ty: 2,
+			refId: assetId,
+			parent: carrier.ind,
+			ip: carrier.ip,
+			op: carrier.op,
+			st: 0,
+			sr: 1,
+			ks: {
+				p: { a: 0, k: [layerPos ? job.px - layerPos[0] : job.px, layerPos ? job.py - layerPos[1] : job.py] },
+				a: { a: 0, k: [w / 2, h / 2] },
+				s: { a: 0, k: [100, 100, 100] }
+			}
+		}
+		owner.layers.splice(at, 0, carrier, image)
+		changed++
+		made.push({ layer: ref.ind, assetId: assetId, copies: 1 })
+	})
+
+	return { changed: changed, layers: made, notes: notes }
+}
+
+const sameColor = function (a, b) {
+	return a && b && Math.abs(a[0] - b[0]) < 0.004 && Math.abs(a[1] - b[1]) < 0.004 && Math.abs(a[2] - b[2]) < 0.004
+}
+
+// The shape layer painting a flat fill of `color` (0..1 rgb), which is the
+// material colour the shader's own pixels replace. Skips layers already used by
+// another job so two shaders in one comp do not share an insertion point.
+function findPaintLayer(list, color, taken, listIndex) {
+	for (var i = 0; i < list.layers.length; i++) {
+		var L = list.layers[i]
+		if (!L || L.ty !== 4 || taken[listIndex + ':' + L.ind]) continue
+		var hit = false
+		var walk = function (items) {
+			for (var k = 0; k < (items || []).length; k++) {
+				var it = items[k]
+				if (!it) continue
+				if (it.ty === 'gr') { walk(it.it); continue }
+				if (it.ty !== 'fl' || !it.c) continue
+				var c = it.c.a === 1 ? null : it.c.k
+				if (Array.isArray(c) && sameColor([c[0], c[1], c[2]], color)) hit = true
+			}
+		}
+		walk(L.shapes)
+		if (hit) return L
+	}
+	return null
 }
 
 // Lay one baked cell over every copy of the layer each job names.
