@@ -98,9 +98,11 @@ export function measureTarget(sm, attr, comp, shift) {
 }
 
 // A cap on how many frames one target is sampled at. Each sample is a whole
-// probe bake, and the values land as hold keys anyway, so more than a couple of
-// dozen samples buys nothing.
+// probe bake, and the values land as hold keys anyway. Integer seed crossings
+// on a long comp (e.g. 38 crossings over 820 frames) need every crossing frame
+// so switches do not skip or drift out of sync with baked fill switches.
 const MAX_SAMPLES = 24
+const MAX_CROSSING_SAMPLES = 64
 
 // Frames worth sampling for a driver that may animate. Not derivable from
 // keyframes: the mango grid's value-blend rig has no keyframe on the valueBlend
@@ -208,10 +210,10 @@ export function subMeshMeasureTargets(comp) {
 			if (seedDriven || seedKeys.length) {
 				const crosses = IntegerCrossings(conn, 'seed', sampleF0 - shift, sampleF1 - shift)
 				const all = crosses.length ? [sampleF0].concat(crosses) : [sampleF0]
-				if (all.length > MAX_SAMPLES) {
+				if (all.length > MAX_CROSSING_SAMPLES) {
 					const picked = [all[0]]
-					for (let k = 1; k < MAX_SAMPLES - 1; k++) {
-						const idx = Math.round((k * (all.length - 1)) / (MAX_SAMPLES - 1))
+					for (let k = 1; k < MAX_CROSSING_SAMPLES - 1; k++) {
+						const idx = Math.round((k * (all.length - 1)) / (MAX_CROSSING_SAMPLES - 1))
 						if (picked[picked.length - 1] !== all[idx]) picked.push(all[idx])
 					}
 					if (picked[picked.length - 1] !== all[all.length - 1]) picked.push(all[all.length - 1])

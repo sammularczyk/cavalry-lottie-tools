@@ -117,6 +117,7 @@ export function exportComp(compId, opts) {
 	var dir = api.getTempFolder() + '/lottie-tools-' + new Date().getTime()
 	api.makeFolder(dir)
 	var restore = []
+	var restoreOut = []
 	var rewired = []
 	var rq = null
 	var frame = api.getFrame() // rendering moves the playhead
@@ -126,6 +127,19 @@ export function exportComp(compId, opts) {
 			api.connect(p.shader, 'id', p.shape, p.path, true) // force swaps the source in place; disconnecting drops the list entry
 			rewired.push(p)
 		})
+		// Cavalry's Lottie writer drops glyph paths (np:0, it:[]) for textShapes
+		// inside a group whose outFrame is shorter than the comp's endFrame.
+		var compEnd = Number(api.get(compId, 'endFrame')) || 0
+		if (compEnd > 0 && typeof api.getOutFrame === 'function' && typeof api.setOutFrame === 'function') {
+			compLayers(compId).forEach(function (id) {
+				if (api.getLayerType(id) !== 'group') return
+				var outF = api.getOutFrame(id)
+				if (outF > 0 && outF < compEnd) {
+					restoreOut.push([id, outF])
+					api.setOutFrame(id, compEnd)
+				}
+			})
+		}
 		if (opts.bakeMode != null) {
 			compLayers(compId).forEach(function (id) {
 				if (!api.hasAttribute(id, 'forceLottieBake')) return
@@ -148,6 +162,11 @@ export function exportComp(compId, opts) {
 		restore.forEach(function (r) {
 			try {
 				api.set(r[0], { forceLottieBake: r[1] })
+			} catch (e) {}
+		})
+		restoreOut.forEach(function (r) {
+			try {
+				api.setOutFrame(r[0], r[1] - 1)
 			} catch (e) {}
 		})
 		if (rq) {
