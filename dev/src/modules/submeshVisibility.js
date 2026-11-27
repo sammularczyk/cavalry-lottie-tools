@@ -558,18 +558,115 @@ export function pairByCentre(copyCentres, groupCentres) {
 // Cavalry y -75 bakes at Lottie path y +75) and paths are relative to a layer
 // anchor, so live Cavalry centres need flipY and both sets are shifted onto a
 // common centroid before the nearest-centre match.
+//
+// The two sets are not always at the same SCALE. extractSubMeshes reports a
+// copy's centre in the duplicator's own unscaled grid space, while the baked
+// paths carry the comp-space copies the writer produced. AD_Card_14's
+// duplicator#24 sits under group#95/#94/#96 (composite scale 2.414), so its live
+// pitch reads 340 and its baked pitch 821 — a nearest-centre match on raw
+// coordinates paired copies 2.4 grids apart and the reveal landed off-centre.
+// A uniform similarity fit (one scale, from the extents of both sets) is enough
+// because the mismatch is a scalar, and it leaves already-equal sets untouched
+// (k == 1).
 export function alignedPairs(src, dst, flipY) {
 	if (!src || !dst) return null
-	const mean = (pts) => {
-		let x = 0, y = 0, n = 0
-		for (const p of pts) if (p) { x += p[0]; y += p[1]; n++ }
-		return n ? [x / n, y / n] : null
+	const median = (a) => {
+		if (!a.length) return 0
+		const s2 = a.slice().sort((x, y) => x - y)
+		return s2[Math.floor(s2.length / 2)]
+	}
+	// A robust centre: a culled copy still bakes, so the baked set can hold a few
+	// groups far off to one side, and a mean would be dragged by them.
+	const centre = (pts) => {
+		const xs = []
+		const ys = []
+		for (const p of pts) if (p) { xs.push(p[0]); ys.push(p[1]) }
+		return xs.length ? [median(xs), median(ys)] : null
+	}
+	const sample = (pts, limit) => {
+		const flatPts = pts.filter(Boolean)
+		if (flatPts.length <= limit) return flatPts
+		const step = flatPts.length / limit
+		const out = []
+		for (let i = 0; i < limit; i++) out.push(flatPts[Math.floor(i * step)])
+		return out
+	}
+	// Mean nearest-group distance in the lower half only: the strays contribute
+	// nothing, so the true scale still separates from a wrong one.
+	const score = (pts) => {
+		const near = []
+		for (const p of pts) {
+			if (!p) continue
+			let bd = Infinity
+			for (const g of dst) {
+				if (!g) continue
+				const dx = g[0] - p[0]
+				const dy = g[1] - p[1]
+				const d = dx * dx + dy * dy
+				if (d < bd) bd = d
+			}
+			near.push(Math.sqrt(bd))
+		}
+		if (!near.length) return Infinity
+		near.sort((a, b) => a - b)
+		const half = near.slice(0, Math.max(1, Math.ceil(near.length * 0.5)))
+		return half.reduce((a, b) => a + b, 0) / half.length
 	}
 	const s = src.map((p) => (p ? [p[0], flipY ? -p[1] : p[1]] : null))
-	const ms = mean(s)
-	const md = mean(dst)
-	if (!ms || !md) return null
-	const moved = s.map((p) => (p ? [p[0] - ms[0] + md[0], p[1] - ms[1] + md[1]] : null))
+	const flat = sample(s, 40)
+	const dc = centre(dst)
+	if (!dc || !flat.length) return null
+	// Translate a candidate onto the baked centre, then score it.
+	const place = (k, sub) => {
+		const sc = sub.map((p) => (p ? [p[0] * k, p[1] * k] : null))
+		const c = centre(sc)
+		if (!c) return null
+		return sc.map((p) => (p ? [p[0] - c[0] + dc[0], p[1] - c[1] + dc[1]] : null))
+	}
+	// The residual is sharp around the true scale (one decimal step away it
+	// climbs by an order of magnitude), so a geometric sweep with a local refine
+	// finds it without assuming unimodality.
+	let best = 1
+	let bestScore = Infinity
+	for (let i = 0; i <= 90; i++) {
+		const k = 0.05 * Math.pow(20 / 0.05, i / 90)
+		const sc = score(place(k, flat))
+		if (sc < bestScore) { bestScore = sc; best = k }
+	}
+	for (let round = 0; round < 4; round++) {
+		const lo = best / 1.16
+		const hi = best * 1.16
+		for (let i = 0; i <= 16; i++) {
+			const k = lo + ((hi - lo) * i) / 16
+			const sc = score(place(k, flat))
+			if (sc < bestScore) { bestScore = sc; best = k }
+		}
+	}
+	const scaled = s.map((p) => (p ? [p[0] * best, p[1] * best] : null))
+	const sc0 = centre(scaled)
+	if (!sc0) return null
+	// Translation is refit from the matches, not left at the centre difference:
+	// the median of the matched offsets is immune to the stray baked groups, so a
+	// few rounds settle on the true translation.
+	let off = [dc[0] - sc0[0], dc[1] - sc0[1]]
+	for (let it = 0; it < 6; it++) {
+		const attempt = scaled.map((p) => (p ? [p[0] + off[0], p[1] + off[1]] : null))
+		const m = pairByCentre(attempt, dst)
+		if (!m) break
+		const dxs = []
+		const dys = []
+		for (let i = 0; i < m.length; i++) {
+			if (m[i] == null || !scaled[i]) continue
+			dxs.push(dst[m[i]][0] - scaled[i][0])
+			dys.push(dst[m[i]][1] - scaled[i][1])
+		}
+		if (!dxs.length) break
+		const next = [median(dxs), median(dys)]
+		const settled = Math.abs(next[0] - off[0]) < 0.01 && Math.abs(next[1] - off[1]) < 0.01
+		off = next
+		if (settled) break
+	}
+	const moved = scaled.map((p) => (p ? [p[0] + off[0], p[1] + off[1]] : null))
 	return pairByCentre(moved, dst)
 }
 

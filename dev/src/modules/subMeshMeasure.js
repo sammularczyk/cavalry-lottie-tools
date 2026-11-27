@@ -52,6 +52,20 @@ const PROBE_NAME = 'lottie-optimiser-submesh-probe'
 
 const srcOf = (id, attr) => String(api.getInConnection(id, attr) || '').split('.')[0]
 
+// The frames a driver is worth reading over: the comp's PLAYBACK range, not its
+// authored range. A comp often carries far more authored frames than it plays
+// (AD_Card_14: endFrame 1200, playbackEnd 467), and sampling the authored range
+// stretches the stride so an animated driver's keys land between samples.
+function sampleRange(comp) {
+	const f0 = Number(api.get(comp, 'startFrame')) || 0
+	const f1 = Number(api.get(comp, 'endFrame')) || f0
+	const p0 = Number(api.get(comp, 'playbackStart'))
+	const p1 = Number(api.get(comp, 'playbackEnd'))
+	const a = isFinite(p0) ? p0 : f0
+	const b = isFinite(p1) && p1 >= a ? p1 : f1
+	return [a, b]
+}
+
 // What has to be measured for one driven subMesh attribute, or null when the
 // driver is evaluated analytically (or is not handled at all). `node` is
 // always the node connected to the attribute; `frames` the user comp's
@@ -66,20 +80,21 @@ export function measureTarget(sm, attr, comp, shift) {
 	if (type === 'visibility') return null
 	if (type === 'javaScript' && expressionIsIndexPure(api.get(conn, 'expression'))) return null
 	if (driverUsesLayerSeed(sm, attr)) return null
+	// Sample the PLAYBACK range: the authored range can be far longer (AD_Card_14
+	// authors 1200 frames and plays 467), and striding over 1200 with a 24-sample
+	// cap drops the falloff's 202 -> 221 scale ramp between samples.
+	const [f0, f1] = sampleRange(comp)
 	if (type === 'oscillator') {
 		if (attr !== 'shapeOpacity' || !srcOf(conn, 'timeOffset')) return null
 		const cfg = oscillatorConfig(conn, comp)
 		if (!cfg || Number(cfg.waveType) !== 0 || Number(cfg.trigType) === 2) return null
-		const f0 = Number(api.get(comp, 'startFrame')) || 0
-		const gap = Math.min(phaseSampleGap(cfg), (Number(api.get(comp, 'endFrame')) || 0) - f0)
+		const gap = Math.min(phaseSampleGap(cfg), f1 - f0)
 		return gap > 0 ? { kind: 'phase', node: conn, frames: [f0, f0 + gap] } : null
 	}
 	// A seeded value driver (Random, Noise) re-rolls each copy every time its
 	// seed crosses an integer, so its per-copy value is piecewise-constant over
 	// time. Detect an animating seed and hand back the crossing frames so the
 	// value can be reproduced with hold keys, instead of baking a single frame.
-	const f0 = Number(api.get(comp, 'startFrame')) || 0
-	const f1 = Number(api.get(comp, 'endFrame')) || f0
 	if (type === 'random' || type === 'noise') {
 		let seedDriven = ''
 		let seedKeys = []
@@ -121,18 +136,29 @@ function chainSampleFrames(conn, f0, f1, shift) {
 	if (typeof api.getAttributes !== 'function') return times
 	const stack = [conn]
 	const visited = {}
+	const readAttr = (id, attr) => {
+		let kt = []
+		try { kt = api.getKeyframeTimes(id, attr) || [] } catch (e) { kt = [] }
+		// keyframe times are authored labels; sample them in read space
+		kt.forEach((t) => { if (typeof t === 'number') { const r = t - shift; if (r > f0 && r < f1 && !seen[r]) { seen[r] = 1; times.push(r) } } })
+		let src = ''
+		try { src = String(api.getInConnection(id, attr) || '').split('.')[0] } catch (e) { src = '' }
+		if (src && src !== id) stack.push(src)
+	}
 	while (stack.length) {
 		const id = stack.pop()
 		if (!id || visited[id]) continue
 		visited[id] = 1
 		;(api.getAttributes(id) || []).forEach((attr) => {
-			let kt = []
-			try { kt = api.getKeyframeTimes(id, attr) || [] } catch (e) { kt = [] }
-			// keyframe times are authored labels; sample them in read space
-			kt.forEach((t) => { if (typeof t === 'number') { const r = t - shift; if (r > f0 && r < f1 && !seen[r]) { seen[r] = 1; times.push(r) } } })
-			let src = ''
-			try { src = String(api.getInConnection(id, attr) || '').split('.')[0] } catch (e) { src = '' }
-			if (src && src !== id) stack.push(src)
+			readAttr(id, attr)
+			// A LIST attribute (a Value's `falloffs`, a duplicator's `deformers`)
+			// connects its sources on the indexed slot, `falloffs.0.id`, so the
+			// top-level attribute has no in-connection of its own. Without expanding
+			// it the walk stops at the Value and never reaches the Falloff whose
+			// `scale.x` carries the reveal ramp (AD_Card_14 keys 202 -> 221).
+			let kids = []
+			try { kids = api.getAttrChildren(id, attr) || [] } catch (e) { kids = [] }
+			kids.forEach((slot) => ['', '.id', '.out'].forEach((suffix) => readAttr(id, slot + suffix)))
 		})
 	}
 	times.sort((a, b) => a - b)

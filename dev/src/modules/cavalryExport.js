@@ -107,6 +107,34 @@ function overrideFor(layer, attr, compId, refId) {
 // opts: { bakeMode: null | 0..4, ref: compositionReference id it's exported for, crop: {from, to} | null }
 //   -> { json, text, dir, file, baked: [ids], shift, first, last }
 // A crop renders only the playback range. It uses the render queue's Custom Range so the
+// The text-bearing groups whose outFrame Cavalry's Lottie writer needs pushed past the
+// comp's endFrame for the glyphs to survive. Returns [holderId, outFrame] pairs for the
+// caller to widen and restore. Cavalry evaluates a text layer's topology over the whole
+// comp range and drops the glyphs (shapes [{ty:'gr',np:0,it:[]}], no `t` field at all)
+// when the group directly holding the text ends at or before the comp's endFrame.
+// Measured on group#98 (in 212, out 581) in a 1200-frame comp: out 581..1200 all export
+// itLen 0, out 1201 exports the full 26 groups. Only the nearest group matters —
+// group#97 (out 86) wraps group#120 (out 1225), and those texts export fine.
+export function textOutFrameLifts(compId, compEnd) {
+	if (!(compEnd > 0)) return []
+	if (typeof api.getOutFrame !== 'function' || typeof api.getParent !== 'function') return []
+	var lifted = {}
+	var out = []
+	compLayers(compId).forEach(function (id) {
+		if (api.getLayerType(id) !== 'textShape') return
+		var holder = api.getParent(id)
+		// A text parented straight to the comp resolves to the comp itself, and
+		// widening that would change the export's own frame span. Only groups lift.
+		if (!holder || holder === compId || lifted[holder]) return
+		if (api.getLayerType(holder) !== 'group') return
+		var outF = api.getOutFrame(holder)
+		if (!(outF > 0) || outF > compEnd) return
+		lifted[holder] = 1
+		out.push([holder, outF])
+	})
+	return out
+}
+
 // comp's own startFrame/endFrame stay as authored: lowering startFrame shifts Cavalry's time
 // base and every frame read lands late (a colour cycle starts on its wrong end).
 // `shift` is the comp's time-base shift; `first` and `last` are the authored frame labels the
@@ -127,19 +155,19 @@ export function exportComp(compId, opts) {
 			api.connect(p.shader, 'id', p.shape, p.path, true) // force swaps the source in place; disconnecting drops the list entry
 			rewired.push(p)
 		})
-		// Cavalry's Lottie writer drops glyph paths (np:0, it:[]) for textShapes
-		// inside a group whose outFrame is shorter than the comp's endFrame.
+		// Cavalry's writer evaluates a text layer's topology over the whole comp range
+		// and drops the glyphs (shapes [{ty:'gr',np:0,it:[]}], no `t` field at all)
+		// when the group directly holding the text ends at or before the comp's
+		// endFrame. Measured on group#98 (in 212, out 581) in a 1200-frame comp: out
+		// 581..1200 all export itLen 0, out 1201 exports the full 26 groups. Only the
+		// nearest group matters — group#97 (out 86) wraps group#120 (out 1225), and
+		// those texts export fine. setOutFrame stores out+1, so passing the comp's own
+		// endFrame leaves the outFrame one past it.
 		var compEnd = Number(api.get(compId, 'endFrame')) || 0
-		if (compEnd > 0 && typeof api.getOutFrame === 'function' && typeof api.setOutFrame === 'function') {
-			compLayers(compId).forEach(function (id) {
-				if (api.getLayerType(id) !== 'group') return
-				var outF = api.getOutFrame(id)
-				if (outF > 0 && outF < compEnd) {
-					restoreOut.push([id, outF])
-					api.setOutFrame(id, compEnd)
-				}
-			})
-		}
+		textOutFrameLifts(compId, compEnd).forEach(function (r) {
+			restoreOut.push(r)
+			api.setOutFrame(r[0], compEnd)
+		})
 		if (opts.bakeMode != null) {
 			compLayers(compId).forEach(function (id) {
 				if (!api.hasAttribute(id, 'forceLottieBake')) return

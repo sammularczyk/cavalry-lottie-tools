@@ -334,3 +334,50 @@ test('alignedPairs flips y and aligns centroids before nearest matching', () => 
 	// copy 0 (0,-10) -> Lottie (0,10)+offset -> (100,210)? nearest after centring: x 0 -> 95, y +10 -> 210
 	assert.deepEqual(m, [1, 0, 3, 2])
 })
+
+test('alignedPairs rescales a live grid that is in unscaled duplicator space', () => {
+	// AD_Card_14: duplicator#24 under group#95/#94/#96 (composite scale 2.414).
+	// extractSubMeshes reports centres at pitch 340, the baked paths at 821.
+	const live = []
+	for (let y = 0; y < 20; y++) for (let x = 0; x < 14; x++) live.push([x * 340, y * 340])
+	const k = 2.414
+	// baked copies in comp space, shuffled so ordinal pairing would fail
+	const baked = live.map((p) => [p[0] * k + 500, -p[1] * k + 700])
+	const shuffled = baked.map((_, i) => baked[(i * 13) % baked.length])
+	const m = alignedPairs(live, shuffled, true)
+	assert.equal(m.length, live.length)
+	assert.equal(m.filter((v) => v !== null).length, live.length)
+	// every live copy must land on its own baked group
+	const seen = new Set(m)
+	assert.equal(seen.size, live.length, 'copies were paired onto shared groups')
+	for (let i = 0; i < live.length; i++) {
+		const want = [live[i][0] * k + 500, -live[i][1] * k + 700]
+		const got = shuffled[m[i]]
+		assert.ok(Math.hypot(got[0] - want[0], got[1] - want[1]) < 1e-6, 'copy ' + i + ' paired to the wrong group')
+	}
+})
+
+test('alignedPairs leaves an already-matching scale alone', () => {
+	const cav = [[0, -10], [10, -10], [0, 10], [10, 10]]
+	const lot = [[105, 210], [95, 210], [105, 190], [95, 190]]
+	assert.deepEqual(alignedPairs(cav, lot, true), [1, 0, 3, 2])
+})
+
+test('alignedPairs ignores baked groups the rig no longer reports', () => {
+	// A culled copy still bakes, so the baked set is a SUPERSET of what
+	// extractSubMeshes reports. Those extra groups sit off to one side and drag
+	// the centroid; the pairing must still land every live copy on its own group.
+	const live = []
+	for (let y = 0; y < 6; y++) for (let x = 0; x < 5; x++) live.push([x * 340, y * 340])
+	const k = 2.414
+	const real = live.map((p) => [p[0] * k + 1231, -p[1] * k + 452])
+	const strays = [[9000, 9000], [-9000, 4000], [7000, -8000], [-6000, -7000]]
+	const baked = real.concat(strays)
+	const m = alignedPairs(live, baked, true)
+	assert.equal(m.filter((v) => v !== null).length, live.length)
+	for (let i = 0; i < live.length; i++) {
+		const want = [live[i][0] * k + 1231, -live[i][1] * k + 452]
+		const got = baked[m[i]]
+		assert.ok(Math.hypot(got[0] - want[0], got[1] - want[1]) < 1e-6, 'copy ' + i + ' paired to the wrong group')
+	}
+})

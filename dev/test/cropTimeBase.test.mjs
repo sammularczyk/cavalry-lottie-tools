@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { timeBase, readFrame, labelFrame } from '../src/modules/cavalryExport.js'
+import { timeBase, readFrame, labelFrame, textOutFrameLifts } from '../src/modules/cavalryExport.js'
 
 const src = (p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8')
 
@@ -65,4 +65,42 @@ test('exportWithPrecomps does not shadow the module shift(prop, dx, dy) helper',
 	const body = text.slice(start)
 	assert.doesNotMatch(body, /\b(?:const|let|var)\s+shift\b/)
 	assert.match(body, /\bshift\(L\.ks && L\.ks\.a, w \/ 2, h \/ 2\)/)
+})
+
+test('textOutFrameLifts widens only short text-holding groups, once each', () => {
+	const saved = globalThis.api
+	const tree = {
+		'compNode#9': ['group#1', 'group#2', 'textShape#deep', 'textShape#own', 'group#3'],
+		'group#1': ['textShape#a'],
+		'group#2': ['group#4'],
+		'group#4': ['textShape#b'],
+		'group#3': ['rect#1']
+	}
+	const type = {
+		'group#1': 'group', 'group#2': 'group', 'group#3': 'group', 'group#4': 'group',
+		'rect#1': 'rectangle',
+		'textShape#a': 'textShape', 'textShape#b': 'textShape', 'textShape#deep': 'textShape', 'textShape#own': 'textShape'
+	}
+	const parent = {
+		'group#1': 'compNode#9', 'group#2': 'compNode#9', 'group#3': 'compNode#9', 'group#4': 'group#2',
+		'textShape#a': 'group#1', 'textShape#b': 'group#4',
+		'textShape#deep': 'compNode#9', 'textShape#own': 'group#3'
+	}
+	// group#1 ends short and holds text -> lifts. group#2 itself holds no text, but
+	// group#4 (its child) does and is short -> group#4 lifts, not group#2.
+	// textShape#deep is parented to the comp -> no lift. group#3 holds text but runs past the comp end -> none.
+	const out = { 'group#1': 40, 'group#2': 1300, 'group#3': 1300, 'group#4': 90 }
+	globalThis.api = {
+		getChildren: (id) => tree[id] || [],
+		getLayerType: (id) => type[id] || (id === 'compNode#9' ? 'comp' : 'shape'),
+		getParent: (id) => parent[id] || '',
+		getOutFrame: (id) => out[id],
+		get: () => 1200
+	}
+	try {
+		assert.deepEqual(textOutFrameLifts('compNode#9', 1200), [['group#1', 40], ['group#4', 90]])
+		assert.deepEqual(textOutFrameLifts('compNode#9', 0), [])
+	} finally {
+		globalThis.api = saved
+	}
 })
