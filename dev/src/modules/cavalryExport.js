@@ -2,9 +2,26 @@
 // The scene is left as it was: bake overrides are restored and the queue item deleted.
 
 import { visibilitySequenceMask, expressionValues, gateOf, clampOpacity, oscillatorSeries, oscillatorPhaseFromSamples, applyValuesToGroups, alignedPairs } from './submeshVisibility.js'
+import { bakeImageFills } from './imageBake.js'
+import { applyImageFills } from './imageFills.js'
 
 // forceLottieBake values, in Cavalry's order.
 export var BAKE_MODES = ['Automatic', 'Animated Mesh', 'Animated Mesh & Materials', 'Nuclear', 'Still']
+
+// Cavalry's `startFrame` shifts the time base: with startFrame 0, setFrame(f) reads authored
+// frame f; with startFrame s, setFrame(f) reads authored frame f + s. A comp whose startFrame
+// is not 0 therefore reads every frame s late, and the authored frame the writer labels `f`
+// is read by setFrame(f - s).
+export function timeBase(comp) {
+	var s = Number(api.get(comp, 'startFrame'))
+	return Number.isFinite(s) ? s : 0
+}
+
+// A Lottie frame label (authored frame) to the frame setFrame reads it at.
+export var readFrame = function (label, shift) { return label - shift }
+
+// A frame read in Cavalry's shifted time base to the authored frame the writer labels it.
+export var labelFrame = function (frame, shift) { return frame + shift }
 
 // Every layer under a comp (getChildren returns direct children only).
 export function compLayers(compId) {
@@ -87,7 +104,14 @@ function overrideFor(layer, attr, compId, refId) {
 	return null
 }
 
-// opts: { bakeMode: null | 0..4, ref: compositionReference id it's exported for }  -> { json, text, dir, file, baked: [ids] }
+// opts: { bakeMode: null | 0..4, ref: compositionReference id it's exported for, crop: {from, to} | null }
+//   -> { json, text, dir, file, baked: [ids], shift, first, last }
+// A crop renders only the playback range. It uses the render queue's Custom Range so the
+// comp's own startFrame/endFrame stay as authored: lowering startFrame shifts Cavalry's time
+// base and every frame read lands late (a colour cycle starts on its wrong end).
+// `shift` is the comp's time-base shift; `first` and `last` are the authored frame labels the
+// export covers (the Lottie ip and op - 1), so a caller sampling the scene can convert them
+// to reads with readFrame(label, shift).
 export function exportComp(compId, opts) {
 	opts = opts || {}
 	var dir = api.getTempFolder() + '/lottie-tools-' + new Date().getTime()
@@ -96,6 +120,7 @@ export function exportComp(compId, opts) {
 	var rewired = []
 	var rq = null
 	var frame = api.getFrame() // rendering moves the playhead
+	var shift = timeBase(compId)
 	try {
 		shaderArrayPicks(compId, opts.ref).forEach(function (p) {
 			api.connect(p.shader, 'id', p.shape, p.path, true) // force swaps the source in place; disconnecting drops the list entry
@@ -112,7 +137,8 @@ export function exportComp(compId, opts) {
 		}
 		rq = api.addRenderQueueItem(compId)
 		api.setGenerator(rq, 'generator', 'renderLottie')
-		api.set(rq, { filePath: dir, fileName: 'export', frameRangeMode: 0 })
+		if (opts.crop) api.set(rq, { filePath: dir, fileName: 'export', frameRangeMode: 2, frameRange: { x: opts.crop.from, y: opts.crop.to } })
+		else api.set(rq, { filePath: dir, fileName: 'export', frameRangeMode: 0 })
 		api.render(rq)
 	} finally {
 		api.setFrame(frame)
@@ -144,12 +170,59 @@ export function exportComp(compId, opts) {
 		frames.push({ frame: compIP + fi })
 	}
 
-	if (fadeAutoAnimate(compId, json)) text = JSON.stringify(json)
-	if (injectVisibilityOpacity(compId, json, frames)) text = JSON.stringify(json)
-	if (injectSubMeshVisibility(compId, json, frames, opts && opts.measuredSubMesh)) text = JSON.stringify(json)
-	if (restructureDuplicators(compId, json, frames, opts)) text = JSON.stringify(json)
+	if (fadeAutoAnimate(compId, json, shift)) text = JSON.stringify(json)
+	if (injectVisibilityOpacity(compId, json, frames, shift)) text = JSON.stringify(json)
+	if (injectSubMeshVisibility(compId, json, frames, opts && opts.measuredSubMesh, shift)) text = JSON.stringify(json)
+	if (restructureDuplicators(compId, json, frames, opts, shift)) text = JSON.stringify(json)
+	// Cavalry's writer emits no image asset for an imageShader fill: the shape
+	// bakes as a flat fill of its material colour. Bake one cell of each shader
+	// in a comp built for it, then repeat that cell over every copy.
+	if (opts && opts.imageFills !== false) {
+		if (applyImageFillsFromScene(compId, json, dir, shift)) text = JSON.stringify(json)
+	}
 	console.log('[restructure] DONE. assets=' + (json.assets ? json.assets.length : 0) + ', layers=' + json.layers.length)
-	return { json: json, text: text, dir: dir, file: file, baked: restore.map(function (r) { return r[0] }) }
+	return { json: json, text: text, dir: dir, file: file, baked: restore.map(function (r) { return r[0] }), shift: shift, first: compIP, last: compOP - 1 }
+}
+
+// Put each imageShader fill back as a real image. The cell is rendered by
+// Cavalry in a comp of its own (see imageBake.js), copied into this comp's
+// export folder so the image packer resolves it like any other image, then
+// repeated over the copies by imageFills.js.
+function applyImageFillsFromScene(compId, json, dir, shift) {
+	var bakes = []
+	try {
+		bakes = bakeImageFills(compId, shift || 0)
+	} catch (e) {
+		console.log('[image-fill] measurement failed: ' + (e && e.message))
+		return false
+	}
+	if (!bakes.length) return false
+	var jobs = []
+	bakes.forEach(function (b) {
+		var target = dir + '/' + b.assetP
+		try {
+			if (api.filePathExists(target)) api.deleteFilePath(target)
+			api.copyFilePath(b.assetFile, target)
+		} catch (e) {
+			console.log('[image-fill] could not copy ' + b.assetP + ': ' + (e && e.message))
+			return
+		}
+		jobs.push({
+			assetId: b.assetId,
+			assetW: b.assetW,
+			assetH: b.assetH,
+			assetU: '',
+			assetP: b.assetP,
+			copyCount: b.copyCount,
+			cellW: b.cellW,
+			spansPitch: b.spansPitch
+		})
+	})
+	if (!jobs.length) return false
+	var r = applyImageFills(json, jobs)
+	r.notes.forEach(function (n) { console.log('[image-fill] ' + n) })
+	if (r.changed) console.log('[image-fill] ' + r.changed + ' layer(s), ' + jobs.length + ' cell image(s)')
+	return r.changed > 0
 }
 
 // The opacity of one glyph under an Auto-Animate: a hold at 0 (or 100) until `start`, then
@@ -194,9 +267,10 @@ export function glyphDelays(text, aa) {
 // case (glyphDelays), else from where its baked path first moves. The progress curve goes
 // on as group opacity.
 // ponytail: other offsets need a position/scale/rotation mode to read the start from.
-function fadeAutoAnimate(compId, json) {
+function fadeAutoAnimate(compId, json, shift) {
 	var changed = 0
 	var frame = api.getFrame()
+	shift = shift || 0
 	compLayers(compId).forEach(function (id) {
 		if (!api.hasAttribute(id, 'deformers.0')) return
 		var aa = (api.getInConnection(id, 'deformers.0') || '').split('.')[0]
@@ -208,7 +282,7 @@ function fadeAutoAnimate(compId, json) {
 		var last = keys.length ? keys[keys.length - 1] : 0
 		var prog = []
 		for (var f = 0; f <= last; f++) {
-			api.setFrame(f)
+			api.setFrame(readFrame(f, shift))
 			prog.push(api.get(aa, attr))
 		}
 		var first = prog.findIndex(function (p) { return p > 0 })
@@ -288,7 +362,7 @@ function getVisibilityValue(curveId, frame) {
 
 // Build a visibility mask for each frame in the composition.
 // Returns: { curveId: [0, 1, 0, 1, ...] } // one entry per frame
-function buildVisibilityMask(compId, frames) {
+function buildVisibilityMask(compId, frames, shift) {
 	var visMap = readVisibilityCurves(compId)
 	var masks = {}
 
@@ -298,7 +372,7 @@ function buildVisibilityMask(compId, frames) {
 
 		var mask = []
 		for (var f = 0; f < frames.length; f++) {
-			mask.push(getVisibilityValue(curveId, frames[f].frame))
+			mask.push(getVisibilityValue(curveId, readFrame(frames[f].frame, shift || 0)))
 		}
 		masks[curveId] = mask
 	}
@@ -322,12 +396,13 @@ function layerNameToNodeId(compId, layerName) {
 // If the layer was static opacity, convert it to animated with the mask baked in.
 // If a shape group is hidden at all frames, mark it `hd` so removeHidden strips it.
 // `frames` is an array of { frame: Number } objects — the frame numbers Cavalry rendered.
-function injectVisibilityOpacity(compId, json, frames) {
+// `shift` is the comp's time-base shift, so each label is read at readFrame(label, shift).
+function injectVisibilityOpacity(compId, json, frames, shift) {
 	var changed = 0
 	var frame = api.getFrame()
 	try {
 		// Build the visibility masks
-		var masks = buildVisibilityMask(compId, frames)
+		var masks = buildVisibilityMask(compId, frames, shift)
 		if (!masks || Object.keys(masks).length === 0) return 0
 
 		// Map each Lottie layer to its visibility mask
@@ -403,7 +478,8 @@ function injectVisibilityOpacity(compId, json, frames) {
 			}
 		})
 	} finally {
-		api.setFrame(frame)
+		try { api.setFrame(frame) } catch (e) {}
+		try { if (prevComp) api.setActiveComp(prevComp) } catch (e) {}
 	}
 	return changed
 }
@@ -459,8 +535,8 @@ export function oscillatorConfig(id, compId) {
 // 'shapeOpacity' (hard-clamped to 0..100, measured). Drivers whose per-copy
 // value only Cavalry can compute come from the clone measurement
 // (subMeshMeasure.js), handed in as `measured`.
-function subMeshDriverValues(sm, attr, frames, compId, measured) {
-	var count = subMeshCopyCount(sm, compId)
+function subMeshDriverValues(sm, attr, frames, compId, measured, shift, host) {
+	var count = subMeshCopyCount(sm, compId, host)
 	if (!count) return null
 	var conn = (api.getInConnection(sm, attr) || '').split('.')[0]
 	if (!conn) return null
@@ -475,7 +551,7 @@ function subMeshDriverValues(sm, attr, frames, compId, measured) {
 	if (type === 'visibility' && isGate) {
 		var masks = []
 		for (var i = 0; i < frames.length; i++) {
-			api.setFrame(frames[i].frame)
+			api.setFrame(readFrame(frames[i].frame, shift))
 			masks.push(
 				visibilitySequenceMask(
 					{
@@ -511,9 +587,30 @@ function subMeshDriverValues(sm, attr, frames, compId, measured) {
 	}
 
 	// The measurement is only trusted for the node it was taken from.
-	var m = measured && measured[sm] && measured[sm][attr]
+	var hostKey = host ? host + ':' + sm : null
+	var m = (hostKey && measured && measured[hostKey] && measured[hostKey][attr]) || (measured && measured[sm] && measured[sm][attr])
 	if (m && m.node === conn) {
 		if (m.kind === 'value') {
+			// A multi-frame measurement is a piecewise-constant value: the driver
+			// re-rolls at the sampled frames, so any export frame takes the value
+			// of the most recent sample not after it. A single sample is a constant.
+			if (m.frames && m.frames.length > 1) {
+				return {
+					measured: m.copies.map(function (k) {
+						var row = []
+						for (var f = 0; f < frames.length; f++) {
+							var t = frames[f].frame
+							var bi = m.frames.length - 1
+							for (var s = 0; s < m.frames.length - 1; s++) {
+								if (t < m.frames[s + 1]) { bi = s; break }
+							}
+							var v = k.vs[bi]
+							row.push(isGate ? (gateOf(v) ? 100 : 0) : clampOpacity(v))
+						}
+						return { c: k.c, row: row }
+					}),
+				}
+			}
 			return {
 				measured: m.copies.map(function (k) {
 					return { c: k.c, row: hold(isGate ? (gateOf(k.v) ? 100 : 0) : clampOpacity(k.v)) }
@@ -589,7 +686,7 @@ export function driverUsesLayerSeed(sm, attr) {
 //
 // The index→position relationship is NOT the grid order you might assume, and
 // Sort/Shuffle/Array distributions reorder ids, so it is read, never derived.
-function readCopyCentres(host, count, compId, sampleFrame) {
+function readCopyCentres(host, count, compId, sampleFrame, shift) {
 	var frame = api.getFrame()
 	var ex = null
 	try {
@@ -597,7 +694,7 @@ function readCopyCentres(host, count, compId, sampleFrame) {
 		api.parent(ex, compId)
 		api.set(ex, { ignoreEmptySubMeshes: false, levelMode: 1, level: 1, indices: '0' })
 		api.connect(host, 'id', ex, 'inputShape')
-		if (typeof sampleFrame === 'number') api.setFrame(sampleFrame)
+		if (typeof sampleFrame === 'number') api.setFrame(readFrame(sampleFrame, shift || 0))
 		var out = []
 		for (var c = 0; c < count; c++) {
 			api.set(ex, { indices: String(c) })
@@ -614,28 +711,54 @@ function readCopyCentres(host, count, compId, sampleFrame) {
 	}
 }
 
-// The duplicator whose deformers slot holds this subMesh, or null.
-export function subMeshHost(sm, compId) {
-	var host = null
+// All duplicators whose deformers slot holds this subMesh.
+export function subMeshHosts(sm, compId) {
+	var hosts = []
 	compLayers(compId).forEach(function (id) {
 		if (api.getLayerType(id) !== 'duplicator') return
 		for (var i = 0; api.hasAttribute(id, 'deformers.' + i); i++) {
-			if ((api.getInConnection(id, 'deformers.' + i) || '').split('.')[0] === sm) host = id
+			if ((api.getInConnection(id, 'deformers.' + i) || '').split('.')[0] === sm) {
+				if (hosts.indexOf(id) < 0) hosts.push(id)
+			}
 		}
 	})
-	return host
+	return hosts
+}
+
+// The duplicator whose deformers slot holds this subMesh, or null.
+export function subMeshHost(sm, compId) {
+	var hosts = subMeshHosts(sm, compId)
+	return hosts.length ? hosts[0] : null
 }
 
 // How many copies a subMesh's host duplicator generates (the attribute path
 // moved between Cavalry versions: generator.count, else generator.input.count).
-function subMeshCopyCount(sm, compId) {
-	var host = subMeshHost(sm, compId)
+function subMeshCopyCount(sm, compId, host) {
+	host = host || subMeshHost(sm, compId)
 	if (!host) return 0
 	var count = null
 	if (api.hasAttribute(host, 'generator.count')) count = api.get(host, 'generator.count')
 	if (!count && api.hasAttribute(host, 'generator.input.count')) count = api.get(host, 'generator.input.count')
 	if (!count || !count.x || !count.y) return 0
 	return Math.max(1, Math.round(count.x * count.y))
+}
+
+// The comp itself plus every comp it reaches through composition references.
+// A scene comp usually holds its rig inside a referenced comp, so a pass that
+// only looks at direct children finds nothing.
+export function referencedComps(compId, seen, out) {
+	seen = seen || {}
+	out = out || []
+	if (!compId || seen[compId]) return out
+	seen[compId] = 1
+	out.push(compId)
+	compLayers(compId).forEach(function (id) {
+		if (api.getLayerType(id) !== 'compositionReference') return
+		var inner = ''
+		try { inner = String(api.getInConnection(id, 'composition') || '').replace(/\.id$/, '') } catch (e) { inner = '' }
+		if (inner && !seen[inner]) referencedComps(inner, seen, out)
+	})
+	return out
 }
 
 // Inject per-submesh visibility into the Lottie JSON. Returns changes count.
@@ -645,42 +768,66 @@ function subMeshCopyCount(sm, compId) {
 // 0 whatever its fade says. Index-ordered sources are paired by live copy
 // centre (y flipped into Lottie space); measured sources by the probe bake's
 // own copy centres. A group some source cannot place is left alone.
-export function injectSubMeshVisibility(compId, json, frames, measured) {
+export function injectSubMeshVisibility(compId, json, frames, measured, shift) {
 	var frame = api.getFrame()
 	var changed = 0
+	var prevComp = api.getActiveComp()
+	shift = shift || 0
 	try {
 		var byHost = {}
 		var order = []
-		compLayers(compId).forEach(function (id) {
-			if (api.getLayerType(id) !== 'subMesh') return
-			var host = subMeshHost(id, compId)
-			if (!host) return
-			if (!byHost[host]) {
-				byHost[host] = []
-				order.push(host)
-			}
-			byHost[host].push(id)
+		var ownerOf = {}
+		// A scene comp usually holds a compositionReference rather than the rig
+		// itself, so a subMesh's host duplicator lives in the REFERENCED comp.
+		// Resolve each subMesh against the comp that owns it.
+		referencedComps(compId).forEach(function (owner) {
+			compLayers(owner).forEach(function (id) {
+				if (api.getLayerType(id) !== 'subMesh') return
+				subMeshHosts(id, owner).forEach(function (host) {
+					if (!byHost[host]) {
+						byHost[host] = []
+						order.push(host)
+						ownerOf[host] = owner
+					}
+					byHost[host].push(id)
+				})
+			})
 		})
 
+		// A baked copy layer can sit in the root layer list or inside a precomp
+		// asset; both hold shapes and both must be considered.
+		var layerLists = [json.layers].concat((json.assets || []).filter(function (a) { return a.layers }).map(function (a) { return a.layers }))
+		var usedLayers = []
+
 		order.forEach(function (host) {
-			var count = subMeshCopyCount(byHost[host][0], compId)
+			var owner = ownerOf[host]
+			try { api.setActiveComp(owner) } catch (e) {}
+			var count = subMeshCopyCount(byHost[host][0], owner, host)
 			if (!count) return
+			var hostName = ''
+			try { if (typeof api.getNiceName === 'function') hostName = api.getNiceName(host) || '' } catch (e) {}
 			var layer = null
 			var best = null
-			json.layers.forEach(function (L) {
-				if (L.ty !== 4) return
-				var g = allCopyGroups(L.shapes)
-				if (g.length < count) return
-				var d = g.length - count
-				if (best === null || d < best) {
-					best = d
-					layer = L
-				}
+			var bestNamed = false
+			layerLists.forEach(function (list) {
+				;(list || []).forEach(function (L) {
+					if (L.ty !== 4 || usedLayers.indexOf(L) >= 0) return
+					var g = allCopyGroups(L.shapes)
+					if (g.length < count) return
+					var d = g.length - count
+					var named = !!(hostName && L.nm === hostName)
+					if (best === null || (named && !bestNamed) || (named === bestNamed && d < best)) {
+						best = d
+						bestNamed = named
+						layer = L
+					}
+				})
 			})
 			if (!layer) {
 				console.log('[submesh-vis] ' + host + ': no shape layer with ' + count + '+ copy groups')
 				return
 			}
+			usedLayers.push(layer)
 			var groups = allCopyGroups(layer.shapes)
 			var groupCentres = groups.map(function (g) { return bakedGroupCentre(g) })
 
@@ -688,7 +835,7 @@ export function injectSubMeshVisibility(compId, json, frames, measured) {
 			byHost[host].forEach(function (id) {
 				;['shapeVisibility', 'shapeOpacity'].forEach(function (attr) {
 					if (!(api.getInConnection(id, attr) || '')) return
-					var s = subMeshDriverValues(id, attr, frames, compId, measured)
+					var s = subMeshDriverValues(id, attr, frames, owner, measured, shift, host)
 					if (s) sources.push(s)
 				})
 			})
@@ -706,7 +853,7 @@ export function injectSubMeshVisibility(compId, json, frames, measured) {
 					for (var g0 = 0; g0 < groups.length; g0++) rows[g0] = src.uniform
 				} else if (src.perCopy) {
 					if (indexPairs === undefined) {
-						indexPairs = alignedPairs(readCopyCentres(host, count, compId, frames.length ? frames[0].frame : null), groupCentres, true)
+						indexPairs = alignedPairs(readCopyCentres(host, count, owner, frames.length ? frames[0].frame : null, shift), groupCentres, true)
 					}
 					if (!indexPairs) {
 						console.log('[submesh-vis] ' + host + ': could not pair copies to baked groups — skipping')
@@ -738,7 +885,8 @@ export function injectSubMeshVisibility(compId, json, frames, measured) {
 			changed += applyValuesToGroups(groups, byGroup, frames)
 		})
 	} finally {
-		api.setFrame(frame)
+		try { api.setFrame(frame) } catch (e) {}
+		try { if (prevComp) api.setActiveComp(prevComp) } catch (e) {}
 	}
 	return changed
 }
@@ -819,10 +967,11 @@ function bakedGroupCentre(g) {
 //
 // Returns total keyframes saved.
 // ---------------------------------------------------------------
-function restructureDuplicators(compId, json, frames, opts) {
+function restructureDuplicators(compId, json, frames, opts, shift) {
 	var changed = 0
 	var saved = 0
 	var frame = api.getFrame()
+	shift = shift || 0
 	try {
 		if (!opts.duplicators) return 0
 

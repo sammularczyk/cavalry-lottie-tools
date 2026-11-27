@@ -244,23 +244,29 @@ function selectedComp() {
 
 // -> { json, dirs, note }
 function exportSelected(measured) {
-	// a playback range narrower than the comp is the part meant to ship: export just that
+	// A playback range narrower than the comp is the part meant to ship. The comp's own
+	// startFrame/endFrame stay as authored: lowering startFrame shifts Cavalry's time base,
+	// so every frame the exporter reads lands `playbackStart` frames late. A colour cycle
+	// cropped to its playback range then starts on the wrong end of the cycle. The crop only
+	// names the label range; the exporter asks the render queue for a Custom Range over it,
+	// so the Lottie's ip/op are the playback range and the time base never moves.
 	var comp = selectedComp()
 	var range = {}
 	;['startFrame', 'endFrame', 'playbackStart', 'playbackEnd'].forEach(function (a) {
 		range[a] = api.get(comp, a)
 	})
 	var narrow = range.playbackStart > range.startFrame || range.playbackEnd < range.endFrame
-	if (narrow) api.set(comp, { startFrame: range.playbackStart, endFrame: range.playbackEnd })
+	var crop = narrow ? { from: range.playbackStart, to: range.playbackEnd } : null
+	if (crop) settings.crop = crop
 	try {
-		return exportRange(measured)
+		return exportRange(measured, crop)
 	} finally {
-		if (narrow) api.set(comp, range)
+		if (crop) settings.crop = null
 	}
 }
 
-function exportRange(measured) {
-	var opts = { bakeMode: settings.bakeMode > 0 ? settings.bakeMode - 1 : null, outlineGradientStrokes: settings.gradientStrokeFills, duplicators: settings.duplicators, measuredTiming: measured && measured.timing, measuredPoints: measured && measured.points, measuredSubMesh: measured && measured.subMesh }
+function exportRange(measured, crop) {
+	var opts = { bakeMode: settings.bakeMode > 0 ? settings.bakeMode - 1 : null, outlineGradientStrokes: settings.gradientStrokeFills, duplicators: settings.duplicators, measuredTiming: measured && measured.timing, measuredPoints: measured && measured.points, measuredSubMesh: measured && measured.subMesh, crop: crop }
 	if (!settings.precomps) {
 		var e = exportComp(selectedComp(), opts)
 		return { json: e.json, dirs: [e.dir], note: '' }

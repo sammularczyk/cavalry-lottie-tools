@@ -23,6 +23,9 @@ function findSource(a, dirs) {
 // Opaque PNG -> JPEG in scratchDir if that's smaller; returns the file to use.
 function toJpeg(src, scratchDir) {
 	if (!/\.png$/i.test(src) || api.getPlatform() !== 'macOS') return src
+	// runProcess is stripped from some script contexts (measured: it is absent in
+	// the MCP host), so a JPEG pass there would throw and lose the whole export.
+	if (typeof api.runProcess !== 'function') return src
 	var alpha = api.runProcess('sips', ['-g', 'hasAlpha', src])
 	if (alpha.error || !/hasAlpha:\s*no/.test(alpha.output)) return src
 	var out = scratchDir + '/' + api.getFileNameFromPath(src, false) + '.jpg'

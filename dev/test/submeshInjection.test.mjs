@@ -50,13 +50,14 @@ const stub = {
 	},
 	get: (id, a) => (scene.layers[id] ? scene.layers[id].attrs[a] : undefined),
 	getInConnection: (id, a) => scene.conns[id + '.' + a] || '',
+	getKeyframeTimes: (id, a) => (scene.layers[id] && scene.layers[id].keyframeTimes && scene.layers[id].keyframeTimes[a]) || [],
+	setFrame: (f) => { stub._frame = f },
+	getFrame: () => (stub._frame !== undefined ? stub._frame : 0),
 	set: (id, dict) => {
 		const L = scene.layers[id]
 		if (L) Object.assign(L.attrs, dict)
 	},
 	connect: (from, _id, to, attr) => connect(from, to, attr),
-	getFrame: () => 0,
-	setFrame: () => {},
 	parent: () => {},
 	create: (type, name) => layer('probe#' + type, type, {}, null),
 	deleteLayer: () => {},
@@ -323,6 +324,51 @@ test('a measured oscillator phase shifts each copy\'s fade (timeOffset in second
 	assert.deepEqual(first.map((v) => Math.round(v)), [50, 100, 50, 0])
 })
 
+test('a random with an animating seed measures at its integer-crossing frames', () => {
+	const { sm, driver } = buildScene('random', { minimum: 0, maximum: 1, useIndex: true, useLayerAsSeed: false }, 'shapeVisibility')
+	scene.layers['comp#1'].attrs = { startFrame: 0, endFrame: 90 }
+	// Give the driver a keyframed seed 0 → 8 over [0, 82] (linear).
+	scene.layers[driver].keyframeTimes = { seed: [0, 82] }
+	// IntegerCrossings reads floor(seed) per frame; model seed(t) = 8t/82.
+	scene.layers[driver].attrs.seed = 0 // placeholder
+	const origGet = stub.get
+	stub.get = (id, a) => {
+		if (id === driver && a === 'seed') return (8 * stub.getFrame()) / 82
+		return scene.layers[id].attrs[a]
+	}
+	const t = measureTarget(sm, 'shapeVisibility', 'comp#1')
+	stub.get = origGet
+	assert.equal(t && t.kind, 'value')
+	assert.equal(t.node, driver)
+	assert.deepEqual(t.frames, [0, 11, 21, 31, 41, 52, 62, 72, 82])
+	delete scene.layers[driver].keyframeTimes
+})
+
+test('a measured multi-frame value reproduces as hold keys', () => {
+	const { sm, driver } = buildScene('value', {}, 'shapeVisibility')
+	// Copy values at frames [0, 11, 21, ...], piecewise-constant gates.
+	const copies = [
+		{ c: [20, 20], v: 0.1, vs: [0.1, 0.9, 0.1, 0.9, 0.1, 0.9, 0.1, 0.9, 0.1] }, // at x 0
+		{ c: [60, 20], v: 0.9, vs: [0.9, 0.1, 0.9, 0.1, 0.9, 0.1, 0.9, 0.1, 0.9] }, // x 40
+	]
+	const measured = { [sm]: { shapeVisibility: { kind: 'value', node: driver, frames: [0, 11, 21, 31, 41, 52, 62, 72, 82], copies } } }
+	const json = { layers: [bakedLayer()] }
+	// frames list drives the export; inject over export frames 0..30.
+	const expFrames = []
+	for (let f = 0; f <= 30; f++) expFrames.push({ frame: f })
+	assert.equal(injectSubMeshVisibility('comp#1', json, expFrames, measured), 2)
+	const g = json.layers[0].shapes[0].it
+	// copy at x 0 (Lottie y 280 = id 2): toggles 100/0/100 → hold keys at 0,11,21
+	const o = trO(g[2])
+	assert.equal(o.a, 1)
+	const keys = o.k.map((k) => [k.t, k.s[0]])
+	assert.deepEqual(keys[0], [0, 100])
+	assert.deepEqual(keys[1], [11, 0])
+	assert.deepEqual(keys[2], [21, 100])
+	// a gate must STEP between values, so every key is a hard hold (h:1), no easing
+	assert.deepEqual(o.k.map((k) => k.h), [1, 1, 1])
+})
+
 test('measureTarget routes each driver', () => {
 	let s = buildScene('value', {}, 'shapeVisibility')
 	assert.deepEqual(measureTarget(s.sm, 'shapeVisibility', 'comp#1'), { kind: 'value', node: s.driver, frames: [0] })
@@ -352,4 +398,73 @@ test('decodeProbeLayer reads each copy\'s value from its sampler width', () => {
 	assert.deepEqual(out.map((o) => Math.round(o.v * 1000) / 1000), [0.4, -3.25, 17.3, 43])
 	assert.deepEqual(out[2].c, [50, 0])
 	assert.equal(decodeProbeLayer({ ty: 4, shapes: [] }), null)
+})
+
+test('a rig inside a referenced comp is found, and its baked layer can sit in a precomp asset', () => {
+	for (const k of Object.keys(scene.layers)) delete scene.layers[k]
+	scene.conns = {}
+	scene.children = {}
+	scene.centres = null
+	// The exported comp only holds a reference; the duplicator and subMesh are
+	// inside the referenced comp, exactly like MangoGrid inside the card.
+	layer('comp#1', 'compNode', {}, null)
+	layer('inner#1', 'compNode', {}, null)
+	const ref = layer('ref#1', 'compositionReference', {}, 'comp#1')
+	connect('inner#1.id', ref, 'composition')
+	const dup = layer('duplicator#1', 'duplicator', { 'generator.count': { x: 4, y: 1 } }, 'inner#1')
+	const sm = layer('subMesh#1', 'subMesh', {}, 'inner#1')
+	connect(sm, dup, 'deformers.0')
+	const gate = layer('visibility#1', 'visibility', { start: 0, end: 25, travel: 0, invert: false, alwaysOn: '', alwaysOff: '' }, 'inner#1')
+	connect(gate, sm, 'shapeVisibility')
+	// The bake lands inside a precomp asset, not the root layer list.
+	const json = { layers: [{ ty: 0, refId: 'comp_0' }], assets: [{ id: 'comp_0', layers: [bakedLayer()] }] }
+	const n = injectSubMeshVisibility('comp#1', json, frames)
+	assert.equal(n, 3)
+	const groups = json.assets[0].layers[0].shapes[0].it
+	assert.equal(groups[0].it.find((i) => i.ty === 'tr').o.a, 0)
+	for (const gi of [1, 2, 3]) assert.equal(groups[gi].hd, true, `copy ${gi}`)
+})
+
+test('a shared subMesh feeding two equal-count duplicators culls both baked layers', () => {
+	for (const k of Object.keys(scene.layers)) delete scene.layers[k]
+	scene.conns = {}
+	scene.children = {}
+	scene.centres = null
+	layer('comp#1', 'compNode', {}, null)
+	const dup1 = layer('duplicator#1', 'duplicator', { 'generator.input.count': { x: 4, y: 1 } }, 'comp#1')
+	const dup2 = layer('duplicator#2', 'duplicator', { 'generator.input.count': { x: 4, y: 1 } }, 'comp#1')
+	scene.layers[dup1].niceName = 'Rainbow Grid'
+	scene.layers[dup2].niceName = 'Background Grid'
+	const sm = layer('subMesh#1', 'subMesh', {}, 'comp#1')
+	connect(sm, dup1, 'deformers.0')
+	connect(sm, dup2, 'deformers.0')
+	const val = layer('value#3', 'value', {}, 'comp#1')
+	connect(val, sm, 'shapeOpacity')
+	const origNiceName = stub.getNiceName
+	stub.getNiceName = (id) => (scene.layers[id] && scene.layers[id].niceName) || id
+	const copies = [
+		{ c: [20, 20], v: 100, vs: [100] },
+		{ c: [60, 20], v: 0, vs: [0] },
+		{ c: [100, 20], v: 0, vs: [0] },
+		{ c: [140, 20], v: 100, vs: [100] },
+	]
+	const measured = {
+		'duplicator#1:subMesh#1': { shapeOpacity: { kind: 'value', node: val, frames: [0], copies } },
+		'duplicator#2:subMesh#1': { shapeOpacity: { kind: 'value', node: val, frames: [0], copies } },
+	}
+	const layerA = bakedLayer()
+	layerA.nm = 'Rainbow Grid'
+	const layerB = bakedLayer()
+	layerB.nm = 'Background Grid'
+	const json = { layers: [layerA, layerB] }
+	const n = injectSubMeshVisibility('comp#1', json, frames, measured)
+	stub.getNiceName = origNiceName
+	assert.equal(n, 4)
+	for (const L of [layerA, layerB]) {
+		const groups = L.shapes[0].it
+		assert.equal(groups[0].hd, undefined)
+		assert.equal(groups[1].hd, true)
+		assert.equal(groups[2].hd, true)
+		assert.equal(groups[3].hd, undefined)
+	}
 })

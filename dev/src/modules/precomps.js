@@ -11,12 +11,16 @@
 // (text, flames, sprigs), so anchors come from the scene and positions are corrected to put
 // each anchor where Cavalry draws the pivot (see repairPositions).
 
-import { exportComp, compLayers, shaderArrayPicks, fillShader } from './cavalryExport.js'
+import { exportComp, compLayers, shaderArrayPicks, fillShader, timeBase, readFrame, labelFrame } from './cavalryExport.js'
 import { duplicatorCompRefs } from './duplicatorCompRefs.js'
 import { emptyLike, taperOutlines, widthCurve } from './taper.js'
 
 const isAnimated = (p) => p && Array.isArray(p.k) && p.k.length && typeof p.k[0] === 'object' && 't' in p.k[0]
 
+// timeBase/readFrame/labelFrame come from cavalryExport.js: `startFrame` shifts Cavalry's
+// time base, so a comp whose startFrame is not 0 reads every frame s late. The optimiser
+// exports a crop through the render queue's Custom Range instead of lowering startFrame,
+// so the shift stays 0 and the authored frame the writer labels `f` is read at `f`.
 const isImageAsset = (a) => a && !a.layers && typeof a.p === 'string' && a.p.indexOf('data:') !== 0
 
 // mn is the scene id with the layer's ind appended for inlined references
@@ -171,9 +175,10 @@ function sceneSkew(L, id, range) {
 	if (!range) return false
 	const [comp, from, to] = range
 	api.setActiveComp(comp)
+	const shift = timeBase(comp)
 	const vals = []
 	for (let f = from; f <= to; f++) {
-		api.setFrame(f)
+		api.setFrame(readFrame(f, shift))
 		const v = at()
 		// keep rotation continuous (atan2 wraps at ±180)
 		if (vals.length) while (v.r - vals[vals.length - 1].r > 180) v.r -= 360
@@ -273,9 +278,10 @@ function sceneOutlinedStroke(L, id, comp, gradients) {
 	const from = Math.max(Math.ceil(L.ip), api.get(comp, 'startFrame')), to = Math.min(Math.ceil(L.op) - 1, api.get(comp, 'endFrame'))
 	if (to < from) return false
 	api.setActiveComp(comp)
+	const shift = timeBase(comp)
 	const frames = []
 	for (let f = from; f <= to; f++) {
-		api.setFrame(f)
+		api.setFrame(readFrame(f, shift))
 		const width = api.get(id, 'stroke.width')
 		const trim = api.get(id, 'stroke.trim') ? { start: api.get(id, 'stroke.trimStart'), end: api.get(id, 'stroke.trimEnd'), travel: api.get(id, 'stroke.trimTravel') } : null
 		frames.push({ t: f, shapes: paths.flatMap((it) => taperOutlines(it.ty === 'el' ? ellipseAt(it, f) : shapeAt(it.ks, f), width, curve, trim, round)) })
@@ -587,7 +593,7 @@ function sceneSpeedKeys(L, id, comp) {
 		}
 		if (!ids.some(speedy)) continue
 		const from = Math.round(prop.k[0].t), to = Math.round(prop.k[prop.k.length - 1].t)
-		const vals = sampleAttr(comp, id, attr, from, to)
+		const vals = sampleAttr(comp, id, attr, from, to, timeBase(comp))
 		const off = offset ? valueAt(prop, from)[0] - sign * vals[0] : 0
 		if (vals.every((v, j) => Math.abs(valueAt(prop, from + j)[0] - (sign * v + off)) <= 0.05)) continue
 		owner[key] = frameKeys(vals, from, (v) => [sign * v + off])
@@ -633,7 +639,7 @@ function sceneOpacity(L, id, range) {
 	}
 	if (drivenAttr(id, 'opacity')) {
 		if (!range) return false
-		const o = frameKeys(sampleAttr(range[0], id, 'opacity', range[1], range[2]), range[1], (v) => [v])
+		const o = frameKeys(sampleAttr(range[0], id, 'opacity', range[1], range[2], timeBase(range[0])), range[1], (v) => [v])
 		L.ks.o = o.a ? o : { a: 0, k: o.k[0] }
 		return true
 	}
@@ -904,15 +910,23 @@ export function applyMasks(masks, targets, parentMatrix) {
 
 // World pivot of scene layers at `frames`, in Lottie comp space (top-left, y down).
 // Opens the comp to evaluate it; the caller puts the user's comp and frame back.
-function samplePivots(comp, ids, frames, maskIds) {
+// `frames` are the authored frame labels the writer uses; the shift converts them to reads.
+function samplePivots(comp, ids, frames, maskIds, shift) {
 	const [w, h] = compSize(comp)
 	const toLottie = (p) => [p.x + w / 2, h / 2 - p.y]
 	api.setActiveComp(comp)
 	if (api.getActiveComp() !== comp) throw new Error('Could not open ' + api.getNiceName(comp) + ' to check its layers')
+	const off = shift == null ? timeBase(comp) : shift
 	const out = {}
+	// Non-renderable driver nodes (falloff, value, random, subMesh, oscillator) can't
+	// resolve a pivot and api.getPivotPosition on them logs Cavalry's "Couldn't find
+	// layer" error. Since the emitted layer represents no drawing, there is nothing to
+	// repair; skip them.
+	const DRIVER_TYPES = new Set(['falloff', 'value', 'random', 'noise', 'oscillator', 'visibilityCurve', 'subMesh', 'rangeFalloff'])
 	for (const f of frames) {
-		api.setFrame(f)
+		api.setFrame(readFrame(f, off))
 		for (const id of ids) {
+			if (DRIVER_TYPES.has(api.getLayerType(id))) continue
 			try {
 				;(out[id] = out[id] || {})[f] = toLottie(api.getPivotPosition(id, true))
 			} catch (e) {}
@@ -933,11 +947,12 @@ function samplePivots(comp, ids, frames, maskIds) {
 
 // A driven (connected) attribute's value at every frame of [from, to]: Cavalry only
 // evaluates it at the current frame. Opens the comp; the caller restores comp and frame.
-function sampleAttr(comp, id, attr, from, to) {
+function sampleAttr(comp, id, attr, from, to, shift) {
 	api.setActiveComp(comp)
+	const off = shift == null ? timeBase(comp) : shift
 	const out = []
 	for (let f = from; f <= to; f++) {
-		api.setFrame(f)
+		api.setFrame(readFrame(f, off))
 		out.push(api.get(id, attr))
 	}
 	return out
@@ -1203,6 +1218,11 @@ export function exportWithPrecomps(compId, opts = {}) {
 		next = 0
 	const userComp = api.getActiveComp(),
 		userFrame = api.getFrame()
+	// The crop lowers the comp's startFrame, which shifts every frame read by that amount.
+	// Everything the exporter reads is converted back to the authored frame the writer labels.
+	// `timeBase` reads the CURRENT startFrame, so a comp whose crop is still applied (an
+	// older caller) still converts correctly; the render-queue crop leaves it at 0.
+	const shift = timeBase(compId)
 
 	function build(comp, ref) {
 		const plan = planMattes(comp, (w) => warnings.push(w))
@@ -1223,16 +1243,32 @@ export function exportWithPrecomps(compId, opts = {}) {
 		// every comp exports to its own folder, and images in two of them can share an id or
 		// a name: point each at its folder and give it an id of its own, before layers are copied
 		const tag = next++
+		// A baked image fill lands inside a precomp asset, not the root layer list.
+		const layerLists = [exported.layers].concat((exported.assets || []).filter((a) => a.layers).map((a) => a.layers))
 		for (const a of exported.assets || []) {
 			if (!isImageAsset(a)) continue
 			const id = a.id + '_' + tag
-			for (const L of exported.layers) if (L.ty === 2 && L.refId === a.id) L.refId = id
+			for (const list of layerLists) for (const L of list) if (L.ty === 2 && L.refId === a.id) L.refId = id
 			a.id = id
 			a.u = out.dir + '/' + (a.u || '')
 		}
 		const ids = new Set(compLayers(comp))
 		const fps = exported.fr
 		const sceneOf = new Map()
+		// Cavalry's writer also emits empty layers for non-renderable driver nodes that sit
+		// as comp children (a falloff / visibilityCurve draws nothing but still becomes a
+		// shape layer). They carry no shapes, so they only pollute the export and make the
+		// later pivot/transform passes call api.getPivotPosition on a node Cavalry can't
+		// resolve, logging "Couldn't find layer: <id>". Drop them up front.
+		exported.layers = exported.layers.filter((L) => {
+			if (L.shapes && L.shapes.length) return true
+			if (L.td || L.tt) return true
+			const id = sceneId(L.mn, ids)
+			if (!id) return true
+			const ty = api.getLayerType(id)
+			if (ty === 'falloff' || ty === 'value' || ty === 'random' || ty === 'noise' || ty === 'oscillator' || ty === 'visibilityCurve' || ty === 'subMesh' || ty === 'rangeFalloff') return false
+			return true
+		})
 		exported.layers = exported.layers.map((L) => {
 			const id = sceneId(L.mn, ids)
 			if (!id) return L
@@ -1408,7 +1444,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 				}
 				const anim = api.getAnimatedAttributes(f) || []
 				const still = api.get(f, 'fillColor')
-				const driven = drivenAttr(f, 'fillColor') && sampleAttr(comp, f, 'fillColor', from, to)
+				const driven = drivenAttr(f, 'fillColor') && sampleAttr(comp, f, 'fillColor', from, to, timeBase(comp))
 				const channels = ['r', 'g', 'b', 'a'].map((c) =>
 					driven ? frameKeys(driven, from, (v) => [v[c] / 255]) : anim.indexOf('fillColor.' + c) >= 0 ? sceneKeys(f, 'fillColor.' + c, (v) => v / 255) : { a: 0, k: still[c] / 255 },
 				)
@@ -1431,7 +1467,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 		let x = axis('x'),
 			y = axis('y')
 		if (drivenAttr(f, 'amount')) {
-			const vals = sampleAttr(comp, f, 'amount', from, to)
+			const vals = sampleAttr(comp, f, 'amount', from, to, timeBase(comp))
 			const k = (c) => {
 				const P = frameKeys(vals, from, (v) => [v[c] * scale])
 				if (!P.a) P.k = P.k[0]
@@ -1452,9 +1488,9 @@ export function exportWithPrecomps(compId, opts = {}) {
 		const start = api.get(comp, 'startFrame'),
 			end = api.get(comp, 'endFrame')
 		const frames = [start, Math.round((start + end) / 2), end]
-		const time = api.get(comp, 'time') || 0
+		const time = api.get(comp, 'time') || 0 // already a read frame, not a label
 		const ids = [...new Set(sceneOf.values())]
-		const world = samplePivots(comp, ids, frames)
+		const world = samplePivots(comp, ids, frames, undefined, shift)
 		const anchorFor = (L) => {
 			const id = sceneOf.get(L)
 			const pv = id && api.get(id, 'pivot')
@@ -1468,7 +1504,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 			const all = []
 			for (let f = start; f <= end; f++) all.push(f)
 			const vids = res.varying.map((L) => sceneOf.get(L))
-			const full = samplePivots(comp, vids, all)
+			const full = samplePivots(comp, vids, all, undefined, shift)
 			res.varying.forEach((L) => bakePosition(L, full[sceneOf.get(L)], res.parentMatrix))
 			baked += res.varying.length
 		}
@@ -1482,7 +1518,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 			for (let f = start; f <= end; f++) every.push(f)
 			const shapesOf = new Map()
 			for (const [, ms] of masked) for (const m of ms) if (!shapesOf.has(m.id)) shapesOf.set(m.id, sourceShapes(m.id))
-			const sampled = samplePivots(comp, [], every, [...new Set([].concat(...shapesOf.values()))])
+			const sampled = samplePivots(comp, [], every, [...new Set([].concat(...shapesOf.values()))], shift)
 			// a source's contours at each frame: all its shapes' contours together
 			const paths = {}
 			for (const [src, shapes] of shapesOf) {
@@ -1498,7 +1534,7 @@ export function exportWithPrecomps(compId, opts = {}) {
 				maskCount += applyMasks(withPaths, drawingUnder(exported.layers, L), res.parentMatrix)
 			}
 		}
-		api.setFrame(time) // leave the comp showing the frame it was on
+		api.setFrame(time) // leave the comp showing the frame it was on (already a read frame)
 	}
 
 	let json

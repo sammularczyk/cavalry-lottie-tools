@@ -87,8 +87,8 @@ test('maskToOpacityProp collapses equal-value runs into one hold key', () => {
 	assert.deepEqual(prop.k.map((k) => [k.t, k.s[0]]), [[0, 100], [3, 0]])
 	// a mask that never flips is a single key, not one per frame
 	assert.deepEqual(maskToOpacityProp([0, 0, 0], f).k.map((k) => k.t), [0])
-	// hold interpolation, so no tangent values are stored
-	assert.deepEqual(prop.k[0].i, { x: [1], y: [1] })
+	// hold interpolation: the player must step, not ease, so each key is an h:1 hold
+	assert.deepEqual(prop.k[0].h, 1)
 })
 
 test('pairByCentre matches by position, not ordinal', () => {
@@ -254,7 +254,8 @@ test('applyValuesToGroups: full leaves alone, zero culls, fade animates', () => 
 	assert.equal(fade.k[fade.k.length - 1].s[0], 0)
 	const gate = groups[3].it.find((i) => i.ty === 'tr').o
 	assert.deepEqual(gate.k.map((k) => [k.t, k.s[0]]), [[0, 100], [1, 0], [2, 100]])
-	assert.deepEqual(gate.k[0].i, { x: [1], y: [1] })
+	// a gate steps between values → hard holds, no easing
+	assert.deepEqual(gate.k.map((k) => k.h), [1, 1, 1])
 })
 
 test('applyValuesToGroups leaves a copy alone when any sample is unknown', () => {

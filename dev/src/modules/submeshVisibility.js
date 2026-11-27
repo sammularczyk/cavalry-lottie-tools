@@ -303,8 +303,7 @@ export function maskToOpacityProp(mask, frames) {
 		keys.push({
 			t: frames[f].frame,
 			s: [v],
-			i: { x: [1], y: [1] },
-			o: { x: [0], y: [0] },
+			h: 1,
 		})
 	}
 	return { a: 1, k: keys }
